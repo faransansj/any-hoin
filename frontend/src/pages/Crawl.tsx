@@ -407,8 +407,8 @@ export default function Crawl() {
 
       {/* ── 로그 ── */}
       <div className="card">
-        <p className="text-sm font-medium text-gray-200 mb-2">로그</p>
         <JobConsole
+          title="로그"
           jobPath="/crawl/logs"
           onState={(s) => setCrawlState(s)}
         />

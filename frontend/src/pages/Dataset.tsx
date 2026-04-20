@@ -224,8 +224,7 @@ export default function Dataset() {
                      <div
                        key={img.id}
                        onClick={() => toggleImage(img.id)}
-                       onDoubleClick={() => setPreviewImg(img)}
-                       className={`relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
+                       className={`group relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
                          sel ? "border-brand-500 scale-95" : "border-transparent hover:border-gray-600"
                        }`}
                      >
@@ -240,6 +239,15 @@ export default function Dataset() {
                         <span className="text-white text-lg">✓</span>
                       </div>
                     )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setPreviewImg(img); }}
+                      className="absolute top-1 right-1 p-1 rounded bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/80"
+                      title="전체보기"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
+                      </svg>
+                    </button>
                   </div>
                 );
               })}

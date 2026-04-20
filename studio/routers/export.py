@@ -110,6 +110,18 @@ def download_model(filename: str):
 
 # ── WebSocket 로그 ────────────────────────────────────────
 
+@router.post("/logs/clear/quant")
+def clear_quant_logs():
+    _quant_job.clear_buffer()
+    return {"cleared": True}
+
+
+@router.post("/logs/clear/onnx")
+def clear_onnx_logs():
+    _onnx_job.clear_buffer()
+    return {"cleared": True}
+
+
 @router.websocket("/logs/quant")
 async def quant_logs(ws: WebSocket):
     await _quant_job.connect_ws(ws)

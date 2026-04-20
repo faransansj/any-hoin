@@ -32,6 +32,12 @@ def get_metrics():
     return {"metrics": _job.metrics, "best_val_acc": _job.best_val_acc}
 
 
+@router.post("/logs/clear")
+def clear_training_logs():
+    _job.clear_buffer()
+    return {"cleared": True}
+
+
 @router.websocket("/logs")
 async def training_logs(ws: WebSocket):
     await _job.connect_ws(ws)
