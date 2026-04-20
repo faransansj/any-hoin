@@ -1,8 +1,10 @@
 """크롤링 라우터 — characters.json 기반 (Hololive 비의존)."""
 
+import os
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket
+import requests as _req
+from fastapi import APIRouter, Query, WebSocket
 
 import studio.characters as ch
 from studio.jobs.crawl_job import CrawlJob
@@ -65,3 +67,64 @@ async def stop_crawl():
 @router.websocket("/logs")
 async def crawl_logs(ws: WebSocket):
     await _job.connect_ws(ws)
+
+
+# ── Danbooru 태그 검색 ────────────────────────────────────────
+
+@router.get("/tags/search")
+def search_tags(q: str = Query(default="", min_length=0), limit: int = 10):
+    """Danbooru 태그 자동완성. category=4(캐릭터) 우선, post_count 내림차순."""
+    q = q.strip()
+    if len(q) < 2:
+        return {"tags": []}
+
+    login = os.getenv("DANBOORU_LOGIN", "")
+    key   = os.getenv("DANBOORU_API_KEY", "")
+    auth  = (login, key) if login else None
+
+    try:
+        r = _req.get(
+            "https://danbooru.donmai.us/tags.json",
+            params={
+                "search[name_matches]": f"*{q}*",
+                "search[order]":        "count",
+                "search[category]":     4,          # 캐릭터 태그만
+                "limit":                limit,
+            },
+            auth=auth,
+            timeout=8,
+            headers={"User-Agent": "HoloScope-Crawler/1.0"},
+        )
+        r.raise_for_status()
+        return {
+            "tags": [
+                {"name": t["name"], "post_count": t["post_count"]}
+                for t in r.json()
+            ]
+        }
+    except Exception as e:
+        return {"tags": [], "error": str(e)}
+
+
+@router.get("/tags/validate/{tag}")
+def validate_tag(tag: str):
+    """태그 존재 여부 및 post_count 반환."""
+    login = os.getenv("DANBOORU_LOGIN", "")
+    key   = os.getenv("DANBOORU_API_KEY", "")
+    auth  = (login, key) if login else None
+
+    try:
+        r = _req.get(
+            "https://danbooru.donmai.us/tags.json",
+            params={"search[name]": tag, "limit": 1},
+            auth=auth,
+            timeout=8,
+            headers={"User-Agent": "HoloScope-Crawler/1.0"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data:
+            return {"valid": True, "post_count": data[0]["post_count"]}
+        return {"valid": False, "post_count": 0}
+    except Exception:
+        return {"valid": None, "post_count": 0}

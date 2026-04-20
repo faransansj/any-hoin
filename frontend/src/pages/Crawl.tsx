@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import JobConsole from "../components/JobConsole";
 import StatusBadge from "../components/StatusBadge";
+import TagSearchInput from "../components/TagSearchInput";
 import { useJobStore } from "../store/jobStore";
 import type { Character, JobState } from "../types";
 
@@ -15,6 +16,7 @@ interface EditState {
   key: string;
   tag: string;
   display_name: string;
+  postCount?: number | null;
 }
 
 export default function Crawl() {
@@ -24,11 +26,12 @@ export default function Crawl() {
   const [selected,   setSelected]   = useState<Set<string>>(new Set());
 
   // 새 캐릭터 추가 폼
-  const [addOpen, setAddOpen]   = useState(false);
-  const [newKey,  setNewKey]    = useState("");
-  const [newTag,  setNewTag]    = useState("");
-  const [newName, setNewName]   = useState("");
-  const [addErr,  setAddErr]    = useState("");
+  const [addOpen,       setAddOpen]       = useState(false);
+  const [newKey,        setNewKey]        = useState("");
+  const [newTag,        setNewTag]        = useState("");
+  const [newName,       setNewName]       = useState("");
+  const [newPostCount,  setNewPostCount]  = useState<number | null>(null);
+  const [addErr,        setAddErr]        = useState("");
 
   // 인라인 편집
   const [editing, setEditing]   = useState<EditState | null>(null);
@@ -73,17 +76,23 @@ export default function Crawl() {
     setSelected(next);
   }
 
+  // 태그 드롭다운 선택 시 빈 key/이름 자동 채우기
+  function handleTagSelect(tag: string) {
+    if (!newKey.trim())  setNewKey(tag);
+    if (!newName.trim()) setNewName(tag);
+  }
+
   // ── 캐릭터 추가 ─────────────────────────────────────────
   async function handleAdd() {
     setAddErr("");
-    const key  = newKey.trim();
     const tag  = newTag.trim();
-    const name = newName.trim() || key;
+    const key  = newKey.trim().replace(/\s+/g, "_").toLowerCase() || tag;
+    const name = newName.trim() || tag;
     if (!key) { setAddErr("Key를 입력하세요"); return; }
     if (!tag) { setAddErr("Danbooru 태그를 입력하세요"); return; }
     try {
       await api.post("/characters", { key, tag, display_name: name });
-      setNewKey(""); setNewTag(""); setNewName(""); setAddOpen(false);
+      setNewKey(""); setNewTag(""); setNewName(""); setNewPostCount(null); setAddOpen(false);
       loadCharacters();
     } catch (e: any) {
       setAddErr(e?.message ?? "추가 실패");
@@ -172,8 +181,9 @@ export default function Crawl() {
                     value={newKey}
                     onChange={(e) => setNewKey(e.target.value)}
                     className="input text-xs"
-                    placeholder="sora_tokino"
+                    placeholder="tokino_sora"
                   />
+                  <p className="text-[10px] text-gray-600 mt-0.5">영문·숫자·_ 권장</p>
                 </div>
                 <div>
                   <label className="label-text">표시 이름</label>
@@ -186,19 +196,25 @@ export default function Crawl() {
                 </div>
                 <div>
                   <label className="label-text">Danbooru 태그</label>
-                  <input
+                  <TagSearchInput
                     value={newTag}
-                    onChange={(e) => setNewTag(e.target.value)}
-                    className="input text-xs"
-                    placeholder="tokino_sora"
+                    onChange={setNewTag}
+                    onPostCount={setNewPostCount}
+                    onSelect={handleTagSelect}
+                    placeholder="태그 입력 또는 검색..."
                   />
+                  {newPostCount != null && (
+                    <p className="text-[10px] text-green-500 mt-0.5">
+                      Danbooru {newPostCount.toLocaleString()}장 확인됨
+                    </p>
+                  )}
                 </div>
               </div>
               {addErr && <p className="text-xs text-red-400">{addErr}</p>}
               <div className="flex gap-2">
                 <button onClick={handleAdd} className="btn-primary text-xs px-3 py-1">추가</button>
                 <button
-                  onClick={() => { setAddOpen(false); setAddErr(""); }}
+                  onClick={() => { setAddOpen(false); setAddErr(""); setNewPostCount(null); }}
                   className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
                 >
                   취소
@@ -254,12 +270,18 @@ export default function Crawl() {
                                 className="input text-xs py-0.5"
                               />
                             </td>
-                            <td className="px-2 py-1">
-                              <input
+                            <td className="px-2 py-1 min-w-[160px]">
+                              <TagSearchInput
                                 value={editing.tag}
-                                onChange={(e) => setEditing({ ...editing, tag: e.target.value })}
-                                className="input text-xs py-0.5"
+                                onChange={(v) => setEditing({ ...editing, tag: v })}
+                                onPostCount={(n) => setEditing({ ...editing, postCount: n })}
+                                className="input text-xs py-0.5 w-full"
                               />
+                              {editing.postCount != null && (
+                                <p className="text-[10px] text-green-500 mt-0.5">
+                                  {editing.postCount.toLocaleString()}장
+                                </p>
+                              )}
                             </td>
                           </>
                         ) : (
