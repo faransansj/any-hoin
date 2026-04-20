@@ -104,5 +104,8 @@ class BaseJob:
         if self._task and not self._task.done():
             self._task.cancel()
 
+    def clear_buffer(self):
+        self._log_buffer.clear()
+
     def status(self) -> dict:
         return {"name": self.name, "state": self.state}

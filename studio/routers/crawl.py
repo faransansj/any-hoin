@@ -64,6 +64,12 @@ async def stop_crawl():
     return {"stopped": True}
 
 
+@router.post("/logs/clear")
+def clear_crawl_logs():
+    _job.clear_buffer()
+    return {"cleared": True}
+
+
 @router.websocket("/logs")
 async def crawl_logs(ws: WebSocket):
     await _job.connect_ws(ws)
