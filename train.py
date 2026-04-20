@@ -368,7 +368,15 @@ def train(args):
         resume_phase = ckpt["phase"]
         resume_epoch = ckpt["epoch"]
         best_val_acc = ckpt["best_val_acc"]
-        model.load_state_dict(ckpt["model_state"])
+        state = ckpt["model_state"]
+        current = model.state_dict()
+        mismatched = {k for k, v in state.items() if k in current and v.shape != current[k].shape}
+        if mismatched:
+            # 클래스 수가 바뀐 경우 head는 현재 모델 초기값을 유지
+            print(f"[경고] 체크포인트 클래스 수 불일치 — head 레이어를 재초기화합니다: {mismatched}")
+            state = {k: v for k, v in state.items() if k not in mismatched}
+            resume_phase, resume_epoch, best_val_acc = 1, 0, 0.0
+        model.load_state_dict(state, strict=False)
         print(
             f"체크포인트 로드: Phase {resume_phase}, "
             f"Epoch {resume_epoch}, best_val_acc={best_val_acc:.4f}"
