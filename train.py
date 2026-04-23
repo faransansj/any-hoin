@@ -355,9 +355,14 @@ def train(args):
         best_pth = save_dir / "best_model.pth"
         if not best_pth.exists():
             raise FileNotFoundError(f"--finetune 모드인데 {best_pth} 가 없습니다.")
-        model.load_state_dict(
-            torch.load(best_pth, weights_only=True, map_location=device)
-        )
+        state = torch.load(best_pth, weights_only=True, map_location=device)
+        current = model.state_dict()
+        mismatched = {k for k, v in state.items() if k in current and v.shape != current[k].shape}
+        if mismatched:
+            print(f"[finetune] 클래스 수 불일치 — head 레이어를 재초기화합니다: {mismatched}")
+            state = {k: v for k, v in state.items() if k not in mismatched}
+            best_val_acc = 0.0
+        model.load_state_dict(state, strict=False)
         resume_phase = 2  # Phase 2(전체 fine-tune)부터 시작
         print(f"[finetune] {best_pth} 로드 완료 — Phase 2 추가학습 시작")
 
