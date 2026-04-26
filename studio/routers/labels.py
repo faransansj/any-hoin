@@ -14,7 +14,11 @@ router = APIRouter(prefix="/labels", tags=["labels"])
 def _count(d: Path) -> int:
     if not d.exists():
         return 0
-    return sum(1 for f in d.iterdir() if f.suffix.lower() in ALLOWED_EXT)
+    return sum(
+        1
+        for f in d.rglob("*")
+        if f.is_file() and f.suffix.lower() in ALLOWED_EXT
+    )
 
 
 @router.get("")
@@ -60,6 +64,7 @@ def rename_label(name: str, body: dict):
     new_name = (body.get("name") or "").strip()
     if not new_name:
         raise HTTPException(400, "new name is required")
+    _guard_name(name)
     _guard_name(new_name)
     src = DATASET_DIR / name
     dst = DATASET_DIR / new_name
@@ -73,6 +78,7 @@ def rename_label(name: str, body: dict):
 
 @router.delete("/{name}")
 def delete_label(name: str):
+    _guard_name(name)
     path = DATASET_DIR / name
     if not path.exists():
         raise HTTPException(404, f"'{name}' not found")

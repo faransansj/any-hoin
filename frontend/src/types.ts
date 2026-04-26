@@ -12,6 +12,8 @@ export interface Character {
   tag:          string;   // Danbooru 검색 태그
   display_name: string;   // UI 표시 이름
   count:        number;   // 현재 이미지 수
+  other_count?: number;   // others/<key>에 격리된 이미지 수
+  total_count?: number;   // count + other_count
 }
 
 // ── 라벨 ────────────────────────────────────────────────

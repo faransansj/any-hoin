@@ -1,6 +1,6 @@
 # 🌟 any-hoin — Integrated Hololive Character Classifier
 
-[한국어](README.kr.md) | [日本語](README.ja.md) | [中文](README.zh.md)
+[한국어](docs/README.kr.md) | [日本語](docs/README.ja.md) | [中文](docs/README.zh.md)
 
 any-hoin is an end-to-end ML studio based on Swin Transformer-Tiny for Hololive character classification.  
 **Crawl → Label → Train → Export → Inference** — all controlled from a single React web UI.
@@ -18,6 +18,39 @@ any-hoin is an end-to-end ML studio based on Swin Transformer-Tiny for Hololive 
 | uv | see below | see below |
 
 > **Windows users**: Native PowerShell is supported for CPU/CUDA. For ROCm or Intel Arc (XPU), use **WSL2** — those PyTorch builds are Linux-only.
+
+---
+
+### Apple Silicon (M1 / M2 / M3 / M4) — One Shot
+
+MPS (Metal Performance Shaders) acceleration is built into the standard PyTorch package — **no extra flags needed**.
+
+```bash
+# 1. Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.cargo/env   # or restart terminal
+
+# 2. Clone and enter the repo
+git clone https://github.com/faransansj/any-hoin.git
+cd any-hoin
+
+# 3. Install Python dependencies (MPS included in default torch build)
+uv sync
+
+# 4. One-shot start: backend + frontend
+./start.sh
+```
+
+`start.sh` opens:
+- Backend API → `http://localhost:8001`
+- Frontend UI → `http://localhost:5173`
+
+Press `Ctrl+C` to stop both at once.
+
+> **MPS notes**:
+> - The trainer auto-detects MPS — no `--device` flag required.
+> - AMP (mixed precision) is not supported on MPS; training runs at FP32, which is still substantially faster than CPU.
+> - If you see `mps` in the training log header, acceleration is active.
 
 ---
 

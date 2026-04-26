@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { useTranslation } from "react-i18next";
 import JobConsole from "../components/JobConsole";
 import MetricsChart from "../components/MetricsChart";
 import StatusBadge from "../components/StatusBadge";
@@ -44,6 +45,7 @@ function ProgressBar({ pct, color = "bg-brand-500", thin }: ProgressBarProps) {
 // ── 컴포넌트 ─────────────────────────────────────────────
 
 export default function Training() {
+  const { t } = useTranslation();
   const {
     trainState, setTrainState,
     trainMetrics, bestValAcc, pushMetric, resetMetrics,
@@ -108,21 +110,22 @@ export default function Training() {
     <div className="p-6 space-y-6 max-w-5xl">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-white">Training</h1>
-          <p className="text-sm text-gray-400 mt-0.5">Swin-T 2-Phase 파인튜닝</p>
+          <h1 className="text-xl font-bold text-white">{t("common.train")}</h1>
+          <p className="text-sm text-gray-400 mt-0.5">{t("training.subtitle")}</p>
         </div>
         <StatusBadge state={trainState} />
       </div>
 
       <div className="grid grid-cols-3 gap-4">
-        {/* ── 설정 패널 ── */}
-        <div className="card space-y-3">
-          <p className="text-sm font-medium text-gray-200">파라미터</p>
+         {/* ── 설정 패널 ── */}
+         <div className="card space-y-3">
+           <p className="text-sm font-medium text-gray-200">{t("training.params_title")}</p>
+ 
+           <div>
+             <label className="label-text">{t("training.device")}</label>
+             <select value={device} onChange={(e) => setDevice(e.target.value)}
+               className="input" disabled={running}>
 
-          <div>
-            <label className="label-text">Device</label>
-            <select value={device} onChange={(e) => setDevice(e.target.value)}
-              className="input" disabled={running}>
               <option value="auto">auto</option>
               <option value="cuda">CUDA</option>
               <option value="mps">MPS (Apple)</option>
@@ -132,59 +135,63 @@ export default function Training() {
           </div>
 
           <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="label-text">Batch Size</label>
-              <input type="number" value={batchSize} min={1}
-                onChange={(e) => setBatchSize(+e.target.value)}
-                className="input" disabled={running} />
-            </div>
-            <div>
-              <label className="label-text">Patience</label>
-              <input type="number" value={patience} min={0}
-                onChange={(e) => setPatience(+e.target.value)}
-                className="input" disabled={running} />
-            </div>
+             <div>
+               <label className="label-text">{t("training.batch_size")}</label>
+               <input type="number" value={batchSize} min={1}
+                 onChange={(e) => setBatchSize(+e.target.value)}
+                 className="input" disabled={running} />
+             </div>
+             <div>
+               <label className="label-text">{t("training.patience")}</label>
+               <input type="number" value={patience} min={0}
+                 onChange={(e) => setPatience(+e.target.value)}
+                 className="input" disabled={running} />
+             </div>
+
           </div>
 
-          <div>
-            <label className="label-text">Phase 1 Epochs (head)</label>
-            <input type="number" value={phase1Epochs} min={1}
-              onChange={(e) => setPhase1Epochs(+e.target.value)}
-              className="input" disabled={running} />
-          </div>
-          <div>
-            <label className="label-text">Phase 2 Epochs (full)</label>
-            <input type="number" value={phase2Epochs} min={1}
-              onChange={(e) => setPhase2Epochs(+e.target.value)}
-              className="input" disabled={running} />
-          </div>
-          <div>
-            <label className="label-text">Phase 2 LR</label>
-            <input value={phase2Lr}
-              onChange={(e) => setPhase2Lr(e.target.value)}
-              className="input" disabled={running} />
-          </div>
+           <div>
+             <label className="label-text">{t("training.phase1_epochs")}</label>
+             <input type="number" value={phase1Epochs} min={1}
+               onChange={(e) => setPhase1Epochs(+e.target.value)}
+               className="input" disabled={running} />
+           </div>
+           <div>
+             <label className="label-text">{t("training.phase2_epochs")}</label>
+             <input type="number" value={phase2Epochs} min={1}
+               onChange={(e) => setPhase2Epochs(+e.target.value)}
+               className="input" disabled={running} />
+           </div>
+           <div>
+             <label className="label-text">{t("training.phase2_lr")}</label>
+             <input value={phase2Lr}
+               onChange={(e) => setPhase2Lr(e.target.value)}
+               className="input" disabled={running} />
+           </div>
+
 
           <div className="space-y-1 pt-1">
-            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-              <input type="checkbox" checked={finetune} onChange={(e) => setFinetune(e.target.checked)}
-                className="accent-brand-500" disabled={running} />
-              Finetune (기존 best 이어서)
-            </label>
-            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-              <input type="checkbox" checked={noAmp} onChange={(e) => setNoAmp(e.target.checked)}
-                className="accent-brand-500" disabled={running} />
-              AMP 비활성화
-            </label>
+             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+               <input type="checkbox" checked={finetune} onChange={(e) => setFinetune(e.target.checked)}
+                 className="accent-brand-500" disabled={running} />
+               {t("training.finetune")}
+             </label>
+             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+               <input type="checkbox" checked={noAmp} onChange={(e) => setNoAmp(e.target.checked)}
+                 className="accent-brand-500" disabled={running} />
+               {t("training.no_amp")}
+             </label>
+
           </div>
 
-          <div className="pt-1">
-            {!running ? (
-              <button onClick={startTraining} className="btn-primary w-full">학습 시작</button>
-            ) : (
-              <button onClick={stopTraining} className="btn-danger w-full">학습 중단</button>
-            )}
-          </div>
+           <div className="pt-1">
+             {!running ? (
+               <button onClick={startTraining} className="btn-primary w-full">{t("training.start_btn")}</button>
+             ) : (
+               <button onClick={stopTraining} className="btn-danger w-full">{t("training.stop_btn")}</button>
+             )}
+           </div>
+
         </div>
 
         {/* ── 오른쪽 패널 ── */}
@@ -192,11 +199,12 @@ export default function Training() {
 
           {/* 요약 카드 */}
           <div className="grid grid-cols-3 gap-3">
-            {[
-              { label: "Best Val Acc", value: bestValAcc > 0 ? `${(bestValAcc * 100).toFixed(2)}%` : "—" },
-              { label: "Epoch",        value: latestMetric ? `${latestMetric.epoch}/${latestMetric.total_epochs}` : "—" },
-              { label: "Phase",        value: latestMetric ? `Phase ${latestMetric.phase}` : "—" },
-            ].map(({ label, value }) => (
+             {[
+               { label: t("training.best_val_acc"), value: bestValAcc > 0 ? `${(bestValAcc * 100).toFixed(2)}%` : "—" },
+               { label: t("training.epoch"),        value: latestMetric ? `${latestMetric.epoch}/${latestMetric.total_epochs}` : "—" },
+               { label: t("training.phase"),        value: latestMetric ? `Phase ${latestMetric.phase}` : "—" },
+             ].map(({ label, value }) => (
+
               <div key={label} className="card text-center">
                 <p className="text-xs text-gray-500 mb-1">{label}</p>
                 <p className="text-lg font-bold text-white">{value}</p>
@@ -210,34 +218,36 @@ export default function Training() {
 
               {/* 전체 / 페이즈 진행률 */}
               <div className="space-y-2">
-                <div className="flex justify-between text-xs text-gray-400">
-                  <span>전체 진행</span>
-                  <span className="tabular-nums">{overallEpoch} / {totalEpochs} epoch</span>
-                </div>
-                <ProgressBar pct={overallPct} color="bg-brand-500" />
+                 <div className="flex justify-between text-xs text-gray-400">
+                   <span>{t("training.overall_progress")}</span>
+                   <span className="tabular-nums">{overallEpoch} / {totalEpochs} epoch</span>
+                 </div>
+                 <ProgressBar pct={overallPct} color="bg-brand-500" />
+ 
+                 <div className="flex justify-between text-xs text-gray-500">
+                   <span>{t("training.phase_progress", { phase: currentPhase })}</span>
+                   <span className="tabular-nums">{phaseEpoch} / {phaseTotal} epoch</span>
+                 </div>
+                 <ProgressBar pct={phasePct} color="bg-indigo-500" thin />
 
-                <div className="flex justify-between text-xs text-gray-500">
-                  <span>Phase {currentPhase}</span>
-                  <span className="tabular-nums">{phaseEpoch} / {phaseTotal} epoch</span>
-                </div>
-                <ProgressBar pct={phasePct} color="bg-indigo-500" thin />
               </div>
 
               {/* 현재 배치 진행률 */}
               {trainProgress && running && (
                 <>
                   <div className="border-t border-gray-700/60 pt-3 space-y-2">
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="text-gray-400">
-                        <span className={trainProgress.split === "train" ? "text-brand-400" : "text-emerald-400"}>
-                          {trainProgress.split}
-                        </span>
-                        {" "}배치
-                      </span>
-                      <span className="tabular-nums text-gray-300">
-                        {trainProgress.batch_cur} / {trainProgress.batch_total}
-                      </span>
-                    </div>
+                     <div className="flex justify-between items-center text-xs">
+                       <span className="text-gray-400">
+                         <span className={trainProgress.split === "train" ? "text-brand-400" : "text-emerald-400"}>
+                           {trainProgress.split}
+                         </span>
+                         {" "} {t("training.batch_progress")}
+                       </span>
+                       <span className="tabular-nums text-gray-300">
+                         {trainProgress.batch_cur} / {trainProgress.batch_total}
+                       </span>
+                     </div>
+
                     <ProgressBar
                       pct={trainProgress.pct}
                       color={trainProgress.split === "train" ? "bg-brand-400" : "bg-emerald-400"}
@@ -246,20 +256,21 @@ export default function Training() {
 
                   {/* 속도 / ETA */}
                   <div className="flex gap-4 text-xs">
-                    <div>
-                      <span className="text-gray-500">속도 </span>
-                      <span className="text-gray-200 tabular-nums font-mono">
-                        {trainProgress.speed_it_s > 0
-                          ? `${trainProgress.speed_it_s.toFixed(2)} it/s`
-                          : "—"}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-gray-500">남은 시간 </span>
-                      <span className="text-gray-200 tabular-nums font-mono">
-                        {fmtEta(trainProgress.eta_sec)}
-                      </span>
-                    </div>
+                     <div>
+                       <span className="text-gray-500">{t("training.speed")} </span>
+                       <span className="text-gray-200 tabular-nums font-mono">
+                         {trainProgress.speed_it_s > 0
+                           ? `${trainProgress.speed_it_s.toFixed(2)} it/s`
+                           : "—"}
+                       </span>
+                     </div>
+                     <div>
+                       <span className="text-gray-500">{t("training.eta")} </span>
+                       <span className="text-gray-200 tabular-nums font-mono">
+                         {fmtEta(trainProgress.eta_sec)}
+                       </span>
+                     </div>
+
                   </div>
                 </>
               )}
@@ -273,19 +284,20 @@ export default function Training() {
         </div>
       </div>
 
-      {/* ── 로그 ── */}
-      <div className="card">
-        <JobConsole
-          title="로그"
-          jobPath="/training/logs"
-          onState={(s) => {
-            setTrainState(s);
-            if (s !== "running") setTrainProgress(null);
-          }}
-          onMetric={(m) => pushMetric(m)}
-          onProgress={(p) => setTrainProgress(p)}
-        />
-      </div>
+       {/* ── 로그 ── */}
+       <div className="card">
+         <JobConsole
+           title={t("training.log_title")}
+           jobPath="/training/logs"
+           onState={(s) => {
+             setTrainState(s);
+             if (s !== "running") setTrainProgress(null);
+           }}
+           onMetric={(m) => pushMetric(m)}
+           onProgress={(p) => setTrainProgress(p)}
+         />
+       </div>
+
     </div>
   );
 }

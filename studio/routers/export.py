@@ -25,9 +25,15 @@ _QUANT_FILES = {
 
 def _entry(fname: str) -> dict:
     p = CHECKPOINT_DIR / fname
+    try:
+        size_mb = round(p.stat().st_size / 1024 ** 2, 1)
+        exists = True
+    except FileNotFoundError:
+        size_mb = None
+        exists = False
     return {
-        "exists":   p.exists(),
-        "size_mb":  round(p.stat().st_size / 1024 ** 2, 1) if p.exists() else None,
+        "exists":   exists,
+        "size_mb":  size_mb,
         "filename": fname,
     }
 

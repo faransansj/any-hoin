@@ -6,40 +6,18 @@ GET  /health   → 헬스 체크
 """
 
 import io
-import json
 from contextlib import asynccontextmanager
 from enum import Enum
-from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from PIL import Image
-import albumentations as A
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-# ──────────────────────────────────────────────
-# 설정
-# ──────────────────────────────────────────────
-
-CHECKPOINT_DIR  = Path("./checkpoints")
-MODEL_PATH      = CHECKPOINT_DIR / "best_model.pth"
-ONNX_PATH       = CHECKPOINT_DIR / "best_model.onnx"
-CLASS_MAP_PATH  = CHECKPOINT_DIR / "class_map.json"
-IMG_SIZE        = 224
-TOP_K           = 5
-
-# ROCm EP 우선순위 (HSA_OVERRIDE_GFX_VERSION=11.0.0 환경변수 필요)
-_ORT_PROVIDERS = ["ROCMExecutionProvider", "MIGraphXExecutionProvider", "CPUExecutionProvider"]
-
-
-def _softmax(x: np.ndarray) -> np.ndarray:
-    e = np.exp(x - x.max())
-    return e / e.sum()
-
+from model_loader import ModelLoader
 
 # ──────────────────────────────────────────────
 # 캐릭터 메타데이터
@@ -153,91 +131,6 @@ class PredictResponse(BaseModel):
 
 
 # ──────────────────────────────────────────────
-# 모델 로더 (싱글턴)
-# ──────────────────────────────────────────────
-
-class ModelLoader:
-    _instance = None
-
-    def __init__(self):
-        self.session = None          # onnxruntime.InferenceSession
-        self.torch_model = None      # PyTorch fallback
-        self.torch_device = None
-        self.idx_to_class: dict[int, str] = {}
-        self.transform = None
-        self.backend: str = ""
-        self._load()
-
-    @classmethod
-    def get(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def _load(self):
-        with open(CLASS_MAP_PATH, encoding="utf-8") as f:
-            raw = json.load(f)
-        self.idx_to_class = {int(k): v for k, v in raw.items()}
-        num_classes = len(self.idx_to_class)
-
-        if ONNX_PATH.exists():
-            self._load_onnx()
-        else:
-            print(f"ONNX 모델 없음 — PyTorch fallback 사용 ({ONNX_PATH})")
-            self._load_torch(num_classes)
-
-        # ToTensorV2 불필요 — numpy transpose로 대체
-        self.transform = A.Compose([
-            A.Resize(IMG_SIZE, IMG_SIZE),
-            A.Normalize(mean=[0.485, 0.456, 0.406],
-                        std=[0.229, 0.224, 0.225]),
-        ])
-
-        print(f"모델 로드 완료: {num_classes}개 클래스, backend={self.backend}")
-
-    def _load_onnx(self):
-        import onnxruntime as ort
-        available = ort.get_available_providers()
-        providers = [p for p in _ORT_PROVIDERS if p in available]
-        self.session = ort.InferenceSession(str(ONNX_PATH), providers=providers)
-        self.backend = f"onnx+{providers[0]}"
-        print(f"ORT providers: {providers}")
-
-    def _load_torch(self, num_classes: int):
-        import torch
-        import timm
-        self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = timm.create_model(
-            "swin_tiny_patch4_window7_224",
-            pretrained=False,
-            num_classes=num_classes,
-        )
-        model.load_state_dict(
-            torch.load(MODEL_PATH, map_location=self.torch_device, weights_only=True)
-        )
-        self.torch_model = model.to(self.torch_device).eval()
-        self.backend = f"torch+{self.torch_device}"
-
-    def predict(self, img: Image.Image) -> tuple[str, float]:
-        """(class_key, confidence) 반환"""
-        img_np = np.array(img.convert("RGB"))
-        transformed = self.transform(image=img_np)["image"]          # (H, W, 3) float32
-        inp = transformed.transpose(2, 0, 1)[np.newaxis].astype(np.float32)  # (1, 3, H, W)
-
-        if self.session is not None:
-            logits = self.session.run(["logits"], {"input": inp})[0][0]
-        else:
-            import torch
-            tensor = torch.from_numpy(inp).to(self.torch_device)
-            with torch.no_grad():
-                logits = self.torch_model(tensor).cpu().numpy()[0]
-
-        probs = _softmax(logits)
-        top_idx = int(probs.argmax())
-        return self.idx_to_class[top_idx], float(probs[top_idx])
-
-
-# ──────────────────────────────────────────────
 # FastAPI 앱
 # ──────────────────────────────────────────────
 
@@ -285,7 +178,7 @@ def get_classes():
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict(file: UploadFile = File(...)):
-    if not file.content_type.startswith("image/"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="이미지 파일만 허용됩니다")
 
     contents = await file.read()

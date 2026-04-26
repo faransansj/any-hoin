@@ -10,6 +10,7 @@ import JobConsole from "../components/JobConsole";
 import StatusBadge from "../components/StatusBadge";
 import TagSearchInput from "../components/TagSearchInput";
 import { useJobStore } from "../store/jobStore";
+import { useTranslation } from "react-i18next";
 import type { Character, JobState } from "../types";
 
 interface EditState {
@@ -20,6 +21,7 @@ interface EditState {
 }
 
 export default function Crawl() {
+  const { t } = useTranslation();
   const { crawlState, setCrawlState } = useJobStore();
 
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -88,20 +90,20 @@ export default function Crawl() {
     const tag  = newTag.trim();
     const key  = newKey.trim().replace(/\s+/g, "_").toLowerCase() || tag;
     const name = newName.trim() || tag;
-    if (!key) { setAddErr("Key를 입력하세요"); return; }
-    if (!tag) { setAddErr("Danbooru 태그를 입력하세요"); return; }
+    if (!key) { setAddErr(t("crawl.err_key")); return; }
+    if (!tag) { setAddErr(t("crawl.err_tag")); return; }
     try {
       await api.post("/characters", { key, tag, display_name: name });
       setNewKey(""); setNewTag(""); setNewName(""); setNewPostCount(null); setAddOpen(false);
       loadCharacters();
     } catch (e: any) {
-      setAddErr(e?.message ?? "추가 실패");
+      setAddErr(e?.message ?? t("crawl.err_fail"));
     }
   }
 
   // ── 캐릭터 삭제 ─────────────────────────────────────────
   async function handleDelete(key: string) {
-    if (!confirm(`'${key}'를 삭제할까요?`)) return;
+    if (!confirm(`'${key}'${t("common.confirm_delete")}`)) return;
     await api.delete(`/characters/${key}`);
     setSelected((prev) => { const s = new Set(prev); s.delete(key); return s; });
     loadCharacters();
@@ -121,7 +123,7 @@ export default function Crawl() {
   // ── 크롤 시작 ────────────────────────────────────────────
   async function startCrawl() {
     const selectedKeys = selected.size > 0 ? Array.from(selected) : characters.map((c) => c.key);
-    await api.post("/crawl/start", {
+    const result = await api.post<{ started?: boolean; error?: string }>("/crawl/start", {
       selected_keys: selectedKeys,
       min_images:    minImages,
       max_images:    maxImages,
@@ -129,10 +131,17 @@ export default function Crawl() {
       username:      username || undefined,
       api_key:       apiKey   || undefined,
     });
+    if (result.error) throw new Error(result.error);
+    if (result.started) setCrawlState("running");
   }
 
   async function stopCrawl() {
     await api.post("/crawl/stop");
+  }
+
+  function handleCrawlState(state: JobState) {
+    setCrawlState(state);
+    if (state === "done" || state === "failed") loadCharacters();
   }
 
   return (
@@ -140,8 +149,8 @@ export default function Crawl() {
       {/* ── 헤더 ── */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-white">Crawl</h1>
-          <p className="text-sm text-gray-400 mt-0.5">Danbooru에서 학습 이미지 수집</p>
+          <h1 className="text-xl font-bold text-white">{t("common.crawl")}</h1>
+          <p className="text-sm text-gray-400 mt-0.5">{t("crawl.subtitle")}</p>
         </div>
         <StatusBadge state={crawlState} />
       </div>
@@ -150,97 +159,100 @@ export default function Crawl() {
         {/* ── 캐릭터 관리 ── */}
         <div className="col-span-2 card space-y-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm font-medium text-gray-200">캐릭터</span>
+            <span className="text-sm font-medium text-gray-200">{t("crawl.char_label")}</span>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">
-                {selected.size > 0 ? `${selected.size}개 선택 /` : ""} 전체 {characters.length}개
+                {selected.size > 0 ? `${selected.size}${t("dataset.selected_count", { count: selected.size })} /` : ""} 전체 {characters.length}개
               </span>
               <button
                 onClick={toggleAll}
                 className="text-xs text-brand-400 hover:text-brand-300"
               >
-                {allSelected ? "전체 해제" : "전체 선택"}
+                {allSelected ? t("crawl.deselect_all") : t("crawl.select_all")}
               </button>
               <button
                 onClick={() => { setAddOpen((o) => !o); setAddErr(""); }}
                 className="text-xs px-2 py-1 rounded bg-brand-600 hover:bg-brand-500 text-white transition-colors"
               >
-                + 추가
+                {t("crawl.add_btn")}
               </button>
             </div>
           </div>
 
           {/* 추가 폼 */}
-          {addOpen && (
-            <div className="bg-gray-800 rounded-lg p-3 space-y-2 border border-gray-700">
-              <p className="text-xs font-medium text-gray-300">새 캐릭터 추가</p>
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <label className="label-text">Key (폴더명)</label>
-                  <input
-                    value={newKey}
-                    onChange={(e) => setNewKey(e.target.value)}
-                    className="input text-xs"
-                    placeholder="tokino_sora"
-                  />
-                  <p className="text-[10px] text-gray-600 mt-0.5">영문·숫자·_ 권장</p>
-                </div>
-                <div>
-                  <label className="label-text">표시 이름</label>
-                  <input
-                    value={newName}
-                    onChange={(e) => setNewName(e.target.value)}
-                    className="input text-xs"
-                    placeholder="Tokino Sora (선택)"
-                  />
-                </div>
-                <div>
-                  <label className="label-text">Danbooru 태그</label>
-                  <TagSearchInput
-                    value={newTag}
-                    onChange={setNewTag}
-                    onPostCount={setNewPostCount}
-                    onSelect={handleTagSelect}
-                    placeholder="태그 입력 또는 검색..."
-                  />
-                  {newPostCount != null && (
-                    <p className="text-[10px] text-green-500 mt-0.5">
-                      Danbooru {newPostCount.toLocaleString()}장 확인됨
-                    </p>
-                  )}
-                </div>
-              </div>
-              {addErr && <p className="text-xs text-red-400">{addErr}</p>}
-              <div className="flex gap-2">
-                <button onClick={handleAdd} className="btn-primary text-xs px-3 py-1">추가</button>
-                <button
-                  onClick={() => { setAddOpen(false); setAddErr(""); setNewPostCount(null); }}
-                  className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
-                >
-                  취소
-                </button>
-              </div>
-            </div>
-          )}
+           {addOpen && (
+             <div className="bg-gray-800 rounded-lg p-3 space-y-2 border border-gray-700">
+               <p className="text-xs font-medium text-gray-300">{t("crawl.new_char")}</p>
+               <div className="grid grid-cols-3 gap-2">
+                 <div>
+                   <label className="label-text">{t("crawl.key_label")}</label>
+                   <input
+                     value={newKey}
+                     onChange={(e) => setNewKey(e.target.value)}
+                     className="input text-xs"
+                     placeholder="tokino_sora"
+                   />
+                   <p className="text-[10px] text-gray-600 mt-0.5">영문·숫자·_ 권장</p>
+                 </div>
+                 <div>
+                   <label className="label-text">{t("crawl.name_label")}</label>
+                   <input
+                     value={newName}
+                     onChange={(e) => setNewName(e.target.value)}
+                     className="input text-xs"
+                     placeholder="Tokino Sora (선택)"
+                   />
+                 </div>
+                 <div>
+                   <label className="label-text">{t("crawl.tag_label")}</label>
+                   <TagSearchInput
+                     value={newTag}
+                     onChange={setNewTag}
+                     onPostCount={setNewPostCount}
+                     onSelect={handleTagSelect}
+                     placeholder={t("crawl.tag_placeholder")}
+                   />
+                   {newPostCount != null && (
+                     <p className="text-[10px] text-green-500 mt-0.5">
+                       {t("crawl.confirmed_count", { count: newPostCount.toLocaleString() })}
+                     </p>
+                   )}
+                 </div>
+               </div>
+               {addErr && <p className="text-xs text-red-400">{addErr}</p>}
+               <div className="flex gap-2">
+                 <button onClick={handleAdd} className="btn-primary text-xs px-3 py-1">{t("common.add")}</button>
+                 <button
+                   onClick={() => { setAddOpen(false); setAddErr(""); setNewPostCount(null); }}
+                   className="text-xs px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-300"
+                 >
+                   {t("common.cancel")}
+                 </button>
+               </div>
+             </div>
+           )}
+
 
           {/* 캐릭터 테이블 */}
           <div className="max-h-72 overflow-y-auto rounded-lg border border-gray-700">
-            {characters.length === 0 ? (
-              <p className="text-xs text-gray-500 text-center py-8">
-                캐릭터가 없습니다. 추가 버튼으로 캐릭터를 등록하세요.
-              </p>
-            ) : (
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-gray-800 text-gray-400">
-                  <tr>
-                    <th className="w-8 px-2 py-2"></th>
-                    <th className="text-left px-2 py-2">Key</th>
-                    <th className="text-left px-2 py-2">표시 이름</th>
-                    <th className="text-left px-2 py-2">Danbooru 태그</th>
-                    <th className="text-right px-2 py-2">이미지</th>
-                    <th className="w-16 px-2 py-2"></th>
-                  </tr>
-                </thead>
+             {characters.length === 0 ? (
+               <p className="text-xs text-gray-500 text-center py-8">
+                 {t("crawl.empty_chars")}
+               </p>
+             ) : (
+
+               <table className="w-full text-xs">
+                 <thead className="sticky top-0 bg-gray-800 text-gray-400">
+                   <tr>
+                     <th className="w-8 px-2 py-2"></th>
+                     <th className="text-left px-2 py-2">{t("crawl.table_key")}</th>
+                     <th className="text-left px-2 py-2">{t("crawl.table_name")}</th>
+                     <th className="text-left px-2 py-2">{t("crawl.table_tag")}</th>
+                     <th className="text-right px-2 py-2">{t("crawl.table_images")}</th>
+                     <th className="w-16 px-2 py-2"></th>
+                   </tr>
+                 </thead>
+
                 <tbody>
                   {characters.map((c) => {
                     const sel = selected.has(c.key);
@@ -290,24 +302,32 @@ export default function Crawl() {
                             <td className="px-2 py-1.5 text-gray-400 font-mono">{c.tag}</td>
                           </>
                         )}
-                        <td className="px-2 py-1.5 text-right text-gray-500">{c.count}</td>
                         <td className="px-2 py-1.5 text-right">
-                          {isEditing ? (
-                            <div className="flex gap-1 justify-end">
-                              <button
-                                onClick={handleEditSave}
-                                className="text-brand-400 hover:text-brand-300"
-                              >
-                                저장
-                              </button>
-                              <button
-                                onClick={() => setEditing(null)}
-                                className="text-gray-500 hover:text-gray-300"
-                              >
-                                취소
-                              </button>
-                            </div>
-                          ) : (
+                          <span className="text-gray-500">{c.count}</span>
+                          {(c.other_count ?? 0) > 0 && (
+                            <span className="block text-[10px] text-yellow-500">
+                              others {c.other_count}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1.5 text-right">
+                         {isEditing ? (
+                           <div className="flex gap-1 justify-end">
+                             <button
+                               onClick={handleEditSave}
+                               className="text-brand-400 hover:text-brand-300"
+                             >
+                               {t("common.save")}
+                             </button>
+                             <button
+                               onClick={() => setEditing(null)}
+                               className="text-gray-500 hover:text-gray-300"
+                             >
+                               {t("common.cancel")}
+                             </button>
+                           </div>
+                         ) : (
+
                             <div className="flex gap-1 justify-end">
                               <button
                                 onClick={() => setEditing({ key: c.key, tag: c.tag, display_name: c.display_name })}
@@ -336,83 +356,85 @@ export default function Crawl() {
         </div>
 
         {/* ── 설정 ── */}
-        <div className="card space-y-3">
-          <p className="text-sm font-medium text-gray-200">설정</p>
+         <div className="card space-y-3">
+           <p className="text-sm font-medium text-gray-200">{t("crawl.config_title")}</p>
+ 
+           <div>
+             <label className="label-text">{t("crawl.min_images")}</label>
+             <input
+               type="number" value={minImages}
+               onChange={(e) => setMinImages(+e.target.value)}
+               className="input" min={1} disabled={running}
+             />
+           </div>
+           <div>
+             <label className="label-text">{t("crawl.max_images")}</label>
+             <input
+               type="number" value={maxImages}
+               onChange={(e) => setMaxImages(+e.target.value)}
+               className="input" min={1} disabled={running}
+             />
+           </div>
+           <div>
+             <label className="label-text">{t("crawl.workers")}</label>
+             <input
+               type="number" value={workers}
+               onChange={(e) => setWorkers(+e.target.value)}
+               className="input" min={1} max={16} disabled={running}
+             />
+           </div>
+ 
+           <hr className="border-gray-700" />
+ 
+           <div>
+             <label className="label-text">{t("crawl.danbooru_id")}</label>
+             <input
+               value={username} onChange={(e) => setUsername(e.target.value)}
+               className="input" placeholder={t("crawl.env_loaded")} disabled={running}
+             />
+           </div>
+           <div>
+             <label className="label-text">{t("crawl.api_key")}</label>
+             <input
+               type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
+               className="input" placeholder={t("crawl.env_loaded")} disabled={running}
+             />
+           </div>
+ 
+           <p className="text-xs text-gray-500">
+             {selected.size === 0
+               ? t("crawl.selection_hint")
+               : t("crawl.selection_count", { count: selected.size })}
+           </p>
+ 
+           <div className="pt-1 space-y-2">
+             {!running ? (
+               <button
+                 onClick={startCrawl}
+                 disabled={characters.length === 0}
+                 className="btn-primary w-full disabled:opacity-40"
+               >
+                 {t("crawl.start_btn")}
+               </button>
+             ) : (
+               <button onClick={stopCrawl} className="btn-danger w-full">
+                 {t("crawl.stop_btn")}
+               </button>
+             )}
+           </div>
+         </div>
 
-          <div>
-            <label className="label-text">최소 이미지 수</label>
-            <input
-              type="number" value={minImages}
-              onChange={(e) => setMinImages(+e.target.value)}
-              className="input" min={1} disabled={running}
-            />
-          </div>
-          <div>
-            <label className="label-text">최대 이미지 수</label>
-            <input
-              type="number" value={maxImages}
-              onChange={(e) => setMaxImages(+e.target.value)}
-              className="input" min={1} disabled={running}
-            />
-          </div>
-          <div>
-            <label className="label-text">병렬 워커 수</label>
-            <input
-              type="number" value={workers}
-              onChange={(e) => setWorkers(+e.target.value)}
-              className="input" min={1} max={16} disabled={running}
-            />
-          </div>
-
-          <hr className="border-gray-700" />
-
-          <div>
-            <label className="label-text">Danbooru ID (선택)</label>
-            <input
-              value={username} onChange={(e) => setUsername(e.target.value)}
-              className="input" placeholder=".env 로드됨" disabled={running}
-            />
-          </div>
-          <div>
-            <label className="label-text">API Key (선택)</label>
-            <input
-              type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)}
-              className="input" placeholder=".env 로드됨" disabled={running}
-            />
-          </div>
-
-          <p className="text-xs text-gray-500">
-            {selected.size === 0
-              ? "선택 없으면 전체 크롤"
-              : `${selected.size}개 캐릭터 크롤`}
-          </p>
-
-          <div className="pt-1 space-y-2">
-            {!running ? (
-              <button
-                onClick={startCrawl}
-                disabled={characters.length === 0}
-                className="btn-primary w-full disabled:opacity-40"
-              >
-                크롤 시작
-              </button>
-            ) : (
-              <button onClick={stopCrawl} className="btn-danger w-full">
-                중단
-              </button>
-            )}
-          </div>
-        </div>
       </div>
 
-      {/* ── 로그 ── */}
-      <div className="card">
-        <JobConsole
-          title="로그"
-          jobPath="/crawl/logs"
-          onState={(s) => setCrawlState(s)}
-        />
-      </div>
+       {/* ── 로그 ── */}
+       <div className="card">
+         <JobConsole
+           title={t("crawl.log_title")}
+           jobPath="/crawl/logs"
+           onState={handleCrawlState}
+         />
+       </div>
+
     </div>
   );
 }

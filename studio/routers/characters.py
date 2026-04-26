@@ -12,15 +12,22 @@ ALLOWED_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 router = APIRouter(prefix="/characters", tags=["characters"])
 
 
-def _count(key: str) -> int:
-    d = DATASET_DIR / key
+def _count_images(d: Path, recursive: bool = False) -> int:
     if not d.exists():
         return 0
-    return sum(1 for f in d.iterdir() if f.suffix.lower() in ALLOWED_EXT)
+    files = d.rglob("*") if recursive else d.iterdir()
+    return sum(1 for f in files if f.is_file() and f.suffix.lower() in ALLOWED_EXT)
 
 
 def _with_count(char: dict) -> dict:
-    return {**char, "count": _count(char["key"])}
+    count = _count_images(DATASET_DIR / char["key"])
+    other_count = _count_images(DATASET_DIR / "others" / char["key"], recursive=True)
+    return {
+        **char,
+        "count": count,
+        "other_count": other_count,
+        "total_count": count + other_count,
+    }
 
 
 # ── 목록 ──────────────────────────────────────────────────

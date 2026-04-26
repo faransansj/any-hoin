@@ -19,7 +19,10 @@ router = APIRouter(prefix="/images", tags=["images"])
 def _image_files(d: Path) -> list[Path]:
     if not d.exists():
         return []
-    return sorted(f for f in d.iterdir() if f.suffix.lower() in ALLOWED_EXT)
+    return sorted(
+        f for f in d.rglob("*")
+        if f.is_file() and f.suffix.lower() in ALLOWED_EXT
+    )
 
 
 # ── 목록 조회 ──────────────────────────────────────────────
@@ -30,7 +33,8 @@ def list_images(
     page: int = Query(1, ge=1),
     per_page: int = Query(60, ge=1, le=200),
 ):
-    files = _image_files(DATASET_DIR / label)
+    label_dir = _resolve_label_dir(label)
+    files = _image_files(label_dir)
     total = len(files)
     start = (page - 1) * per_page
     page_files = files[start : start + per_page]
@@ -41,11 +45,11 @@ def list_images(
         "per_page": per_page,
         "images": [
             {
-                "id":        f"{label}/{f.name}",
-                "name":      f.name,
+                "id":        f"{label}/{f.relative_to(label_dir).as_posix()}",
+                "name":      f.relative_to(label_dir).as_posix(),
                 "label":     label,
-                "url":       f"/api/images/file/{label}/{f.name}",
-                "thumbnail": f"/api/images/thumb/{label}/{f.name}",
+                "url":       f"/api/images/file/{label}/{f.relative_to(label_dir).as_posix()}",
+                "thumbnail": f"/api/images/thumb/{label}/{f.relative_to(label_dir).as_posix()}",
             }
             for f in page_files
         ],
@@ -75,7 +79,7 @@ async def upload_images(
     label: str               = Form(...),
     files: list[UploadFile]  = File(...),
 ):
-    label_dir = DATASET_DIR / label
+    label_dir = _resolve_label_dir(label)
     label_dir.mkdir(parents=True, exist_ok=True)
 
     saved = []
@@ -104,14 +108,14 @@ def move_images(body: dict):
     if not target_label:
         raise HTTPException(400, "target_label required")
 
-    target_dir = DATASET_DIR / target_label
+    target_dir = _resolve_label_dir(target_label)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     moved = []
     for img_id in image_ids:
-        src = DATASET_DIR / img_id
-        if src.exists():
-            dst = target_dir / src.name
+        src = _resolve_image_id(img_id)
+        if src.exists() and src.is_file():
+            dst = _unique_path(target_dir / src.name)
             shutil.move(str(src), str(dst))
             _evict_thumb(img_id)
             moved.append(img_id)
@@ -124,8 +128,8 @@ def delete_images(body: dict):
     image_ids = body.get("image_ids", [])
     deleted = []
     for img_id in image_ids:
-        src = DATASET_DIR / img_id
-        if src.exists():
+        src = _resolve_image_id(img_id)
+        if src.exists() and src.is_file():
             src.unlink()
             _evict_thumb(img_id)
             deleted.append(img_id)
@@ -134,19 +138,19 @@ def delete_images(body: dict):
 
 # ── 파일 / 썸네일 제공 ──────────────────────────────────────
 
-@router.get("/file/{label}/{filename}")
+@router.get("/file/{label}/{filename:path}")
 def get_file(label: str, filename: str):
     _guard(label, filename)
-    path = DATASET_DIR / label / filename
+    path = _resolve_label_dir(label) / filename
     if not path.exists():
         raise HTTPException(404)
     return FileResponse(str(path))
 
 
-@router.get("/thumb/{label}/{filename}")
+@router.get("/thumb/{label}/{filename:path}")
 def get_thumb(label: str, filename: str):
     _guard(label, filename)
-    src   = DATASET_DIR / label / filename
+    src   = _resolve_label_dir(label) / filename
     thumb = THUMB_DIR / label / filename
 
     if not src.exists():
@@ -168,12 +172,54 @@ def get_thumb(label: str, filename: str):
 
 def _guard(label: str, filename: str):
     """Path traversal 방지."""
-    for part in (label, filename):
-        if ".." in part or "/" in part or "\\" in part:
-            raise HTTPException(400, "Invalid path")
+    _resolve_label_dir(label)
+    _validate_relative_path(filename)
+
+
+def _validate_relative_path(path: str):
+    if not isinstance(path, str):
+        raise HTTPException(400, "Invalid path")
+    rel = Path(path)
+    if rel.is_absolute() or path.startswith("/") or "\\" in path:
+        raise HTTPException(400, "Invalid path")
+    if any(part in {"", ".", ".."} for part in rel.parts):
+        raise HTTPException(400, "Invalid path")
+
+
+def _resolve_label_dir(label: str) -> Path:
+    if not label:
+        raise HTTPException(400, "Invalid label")
+    _validate_relative_path(label)
+    if len(Path(label).parts) != 1:
+        raise HTTPException(400, "Invalid label")
+    return DATASET_DIR / label
+
+
+def _resolve_image_id(img_id: str) -> Path:
+    if not img_id:
+        raise HTTPException(400, "Invalid image id")
+    _validate_relative_path(img_id)
+    path = DATASET_DIR / img_id
+    try:
+        path.resolve().relative_to(DATASET_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "Invalid image id")
+    return path
+
+
+def _unique_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    idx = 1
+    while True:
+        candidate = path.with_name(f"{path.stem}_{idx}{path.suffix}")
+        if not candidate.exists():
+            return candidate
+        idx += 1
 
 
 def _evict_thumb(img_id: str):
+    _validate_relative_path(img_id)
     thumb = THUMB_DIR / img_id
     if thumb.exists():
         thumb.unlink(missing_ok=True)

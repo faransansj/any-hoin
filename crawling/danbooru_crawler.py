@@ -149,6 +149,9 @@ HOLOLIVE_MEMBERS = {
 BASE_URL      = "https://danbooru.donmai.us"
 ALLOWED_RATINGS = {"g", "s"}   # general, sensitive (SFW)
 ALLOWED_EXT     = {".jpg", ".jpeg", ".png", ".webp"}
+POSTS_PER_PAGE  = 100
+QUEUE_PAGE_FACTOR = 3           # 필터/중복/다운로드 실패 여유분
+MIN_QUEUE_PAGES = 10
 PAGE_SLEEP      = 0.5           # API 페이지 요청 간격 (초)
 
 
@@ -173,7 +176,7 @@ class DanbooruCrawler:
     def _get_posts(self, tag: str, page: int) -> list[dict]:
         params = {
             "tags":  f"{tag} rating:general,sensitive",
-            "limit": 100,
+            "limit": POSTS_PER_PAGE,
             "page":  page,
         }
         try:
@@ -220,9 +223,14 @@ class DanbooruCrawler:
     ) -> list[tuple[str, Path]]:
         """다운로드할 (url, 저장경로) 목록을 API에서 수집 (순차적으로 rate-limit 준수)"""
         queue: list[tuple[str, Path]] = []
+        seen_paths: set[Path] = set()
         page = 1
+        max_pages = max(
+            MIN_QUEUE_PAGES,
+            ((need + POSTS_PER_PAGE - 1) // POSTS_PER_PAGE) * QUEUE_PAGE_FACTOR,
+        )
 
-        while len(queue) < need and page <= 10:
+        while len(queue) < need and page <= max_pages:
             posts = self._get_posts(tag, page)
             if not posts:
                 break
@@ -243,13 +251,15 @@ class DanbooruCrawler:
                     continue
 
                 save_path = char_dir / f"{post['id']}{ext}"
-                if save_path.exists():
+                if save_path in seen_paths or save_path.exists():
                     continue
 
+                seen_paths.add(save_path)
                 queue.append((file_url, save_path))
 
             page += 1
-            time.sleep(PAGE_SLEEP)
+            if len(queue) < need:
+                time.sleep(PAGE_SLEEP)
 
         return queue
 
@@ -267,6 +277,7 @@ class DanbooruCrawler:
         """(status, count) 반환.  status: 'included' | 'skipped' | 'below_threshold'"""
         char_dir = self.output_dir / char_name
         char_dir.mkdir(parents=True, exist_ok=True)
+        self._restore_from_others(char_name)
 
         existing = len([
             f for f in char_dir.iterdir()
@@ -303,6 +314,78 @@ class DanbooruCrawler:
         if collected < min_images:
             return "below_threshold", collected
         return "included", collected
+
+    def _unique_path(self, path: Path) -> Path:
+        """Return a non-existing sibling path without overwriting existing files."""
+        if not path.exists():
+            return path
+        idx = 1
+        while True:
+            candidate = path.with_name(f"{path.stem}_{idx}{path.suffix}")
+            if not candidate.exists():
+                return candidate
+            idx += 1
+
+    def _same_file_contents(self, a: Path, b: Path) -> bool:
+        if not a.is_file() or not b.is_file():
+            return False
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        return hashlib.md5(a.read_bytes()).digest() == hashlib.md5(b.read_bytes()).digest()
+
+    def _move_file(self, src: Path, dst: Path) -> int:
+        if dst.exists():
+            if self._same_file_contents(src, dst):
+                src.unlink()
+                return 0
+            dst = self._unique_path(dst)
+        shutil.move(str(src), str(dst))
+        return 1
+
+    def _merge_dir_contents(self, src: Path, dst: Path) -> int:
+        """Merge src directory contents into dst, then remove the empty src."""
+        if not src.exists():
+            return 0
+        if src.resolve() == dst.resolve():
+            return 0
+
+        dst.mkdir(parents=True, exist_ok=True)
+        moved = 0
+        for item in src.iterdir():
+            target = dst / item.name
+            if item.is_dir():
+                moved += self._merge_dir_contents(item, target)
+                continue
+
+            moved += self._move_file(item, target)
+
+        try:
+            src.rmdir()
+        except OSError:
+            pass
+        return moved
+
+    def _move_to_others(self, char_name: str) -> int:
+        """Move a below-threshold class into others without nested duplicate dirs."""
+        src = self.output_dir / char_name
+        dst = self.output_dir / "others" / char_name
+
+        # Repair legacy nested dirs produced by shutil.move(src, existing_dst).
+        legacy_nested = dst / char_name
+        moved = self._merge_dir_contents(legacy_nested, dst)
+        moved += self._merge_dir_contents(src, dst)
+        return moved
+
+    def _restore_from_others(self, char_name: str) -> int:
+        """Bring previously below-threshold images back when recrawling a class."""
+        char_dir = self.output_dir / char_name
+        other_dir = self.output_dir / "others" / char_name
+
+        # Flatten any legacy others/<char>/<char> directory first.
+        legacy_nested = other_dir / char_name
+        moved = self._merge_dir_contents(legacy_nested, char_dir)
+        moved += self._merge_dir_contents(other_dir, char_dir)
+        return moved
 
     # ── 전체 실행 ────────────────────────────
 
@@ -380,11 +463,7 @@ class DanbooruCrawler:
                         task_id,
                         description=f"[red]✗ {char_name:<25}[/]",
                     )
-                    src = self.output_dir / char_name
-                    dst = self.output_dir / "others" / char_name
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if src.exists():
-                        shutil.move(str(src), str(dst))
+                    self._move_to_others(char_name)
                     results["below_threshold"].append((char_name, count))
 
                 progress.update(overall, advance=1)

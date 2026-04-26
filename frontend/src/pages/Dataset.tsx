@@ -3,13 +3,19 @@
  * - 좌측: 라벨 목록 (CRUD)
  * - 우측: 이미지 그리드 (선택 → 이동/삭제 / 업로드)
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { api } from "../api";
+import { useTranslation } from "react-i18next";
 import ImageModal from "../components/ImageModal";
-import type { ImageItem, Label } from "../types";
+import { useJobStore } from "../store/jobStore";
+import type { ImageItem, JobState, Label } from "../types";
+
+const PER_PAGE = 60;
 
 export default function Dataset() {
+  const { t } = useTranslation();
+  const { crawlState, setCrawlState } = useJobStore();
   const [labels,       setLabels]       = useState<Label[]>([]);
   const [activeLabel,  setActiveLabel]  = useState<string | null>(null);
   const [images,       setImages]       = useState<ImageItem[]>([]);
@@ -21,19 +27,18 @@ export default function Dataset() {
   const [moveTarget,   setMoveTarget]   = useState("");
   const [loading,      setLoading]      = useState(false);
 
-  const PER_PAGE = 60;
-
   // ── 라벨 목록 ──────────────────────────────────────────
-  async function loadLabels() {
+  const loadLabels = useCallback(async () => {
     const r = await api.get<{ labels: Label[] }>("/labels");
     setLabels(r.labels);
-    if (!activeLabel && r.labels.length > 0) {
-      setActiveLabel(r.labels[0].name);
-    }
-  }
+    setActiveLabel((current) => {
+      if (current && r.labels.some((l) => l.name === current)) return current;
+      return r.labels[0]?.name ?? null;
+    });
+  }, []);
 
   // ── 이미지 목록 ────────────────────────────────────────
-  async function loadImages(label: string, p = 1) {
+  const loadImages = useCallback(async (label: string, p = 1) => {
     setLoading(true);
     try {
       const r = await api.get<{ total: number; images: ImageItem[] }>(
@@ -46,12 +51,51 @@ export default function Dataset() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
-  useEffect(() => { loadLabels(); }, []);
+  useEffect(() => { void loadLabels(); }, [loadLabels]);
   useEffect(() => {
-    if (activeLabel) loadImages(activeLabel, 1);
-  }, [activeLabel]);
+    if (activeLabel) {
+      void loadImages(activeLabel, 1);
+      return;
+    }
+    setImages([]);
+    setTotalImages(0);
+    setPage(1);
+    setSelected(new Set());
+  }, [activeLabel, loadImages]);
+
+  useEffect(() => {
+    api.get<{ state: JobState }>("/crawl/status")
+      .then((r) => setCrawlState(r.state))
+      .catch(console.error);
+  }, [setCrawlState]);
+
+  useEffect(() => {
+    if (crawlState !== "running") return;
+
+    let dead = false;
+
+    async function refreshDatasetFromCrawl() {
+      try {
+        const status = await api.get<{ state: JobState }>("/crawl/status");
+        if (dead) return;
+        setCrawlState(status.state);
+        await loadLabels();
+        if (activeLabel) await loadImages(activeLabel, page);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    void refreshDatasetFromCrawl();
+    const timer = setInterval(refreshDatasetFromCrawl, 5000);
+
+    return () => {
+      dead = true;
+      clearInterval(timer);
+    };
+  }, [activeLabel, crawlState, loadImages, loadLabels, page, setCrawlState]);
 
   // ── 라벨 생성 ─────────────────────────────────────────
   async function createLabel() {
@@ -64,7 +108,7 @@ export default function Dataset() {
   }
 
   async function deleteLabel(name: string) {
-    if (!confirm(`"${name}" 라벨과 이미지를 모두 삭제하시겠습니까?`)) return;
+    if (!confirm(`"${name}" ${t("common.confirm_delete")}`)) return;
     await api.delete(`/labels/${encodeURIComponent(name)}`);
     if (activeLabel === name) setActiveLabel(null);
     await loadLabels();
@@ -79,7 +123,7 @@ export default function Dataset() {
     await api.upload("/images/upload", form);
     await loadLabels();
     await loadImages(activeLabel, page);
-  }, [activeLabel, page]);
+  }, [activeLabel, loadImages, loadLabels, page]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -125,15 +169,15 @@ export default function Dataset() {
       <input {...getInputProps()} />
 
       {/* ── 좌측 라벨 패널 ─────────────────────── */}
-      <aside className="w-52 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
-        <div className="p-3 border-b border-gray-800">
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Labels</p>
+      <aside className="w-52 bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
+        <div className="p-3 border-b border-gray-200 dark:border-gray-800">
+          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">{t("dataset.labels_title")}</p>
           <div className="flex gap-1">
             <input
               value={newLabelName}
               onChange={(e) => setNewLabelName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && createLabel()}
-              placeholder="새 라벨..."
+              placeholder={t("dataset.new_label_placeholder")}
               className="input text-xs py-1"
             />
             <button onClick={createLabel} className="btn-primary px-2 py-1 text-xs shrink-0">+</button>
@@ -166,57 +210,58 @@ export default function Dataset() {
 
       {/* ── 우측 이미지 그리드 ─────────────────── */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* 툴바 */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-800 bg-gray-900 shrink-0">
-          <span className="text-sm text-gray-300 font-medium">
-            {activeLabel ?? "라벨을 선택하세요"}
-          </span>
-          <span className="text-xs text-gray-600">{totalImages}장</span>
+            <div className="flex items-center gap-2 px-4 py-2 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 shrink-0">
+              <span className="text-sm text-gray-600 dark:text-gray-300 font-medium">
+                {activeLabel ?? t("dataset.selected_label")}
+              </span>
+              <span className="text-xs text-gray-500 dark:text-gray-600">{totalImages}{t("dataset.total_images")}</span>
+ 
+              {selected.size > 0 && (
+                <>
+                  <span className="text-xs text-brand-400">{t("dataset.selected_count", { count: selected.size })}</span>
+                  <select
+                    value={moveTarget}
+                    onChange={(e) => setMoveTarget(e.target.value)}
+                    className="input text-xs py-1 w-32"
+                  >
+                    <option value="">{t("dataset.move_target")}</option>
+                    {labels.filter((l) => l.name !== activeLabel).map((l) => (
+                      <option key={l.name} value={l.name}>{l.name}</option>
+                    ))}
+                  </select>
+                  <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">{t("common.move") || "이동"}</button>
+                  <button onClick={deleteSelected} className="btn-danger text-xs py-1">{t("common.delete")}</button>
+                </>
+              )}
+ 
+              <div className="ml-auto flex items-center gap-2">
+                <button onClick={selectAll} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">{t("dataset.select_all")}</button>
+                <label className="btn-ghost text-xs py-1 cursor-pointer">
+                  {t("dataset.upload_btn")}
+                  <input type="file" multiple accept="image/*" className="hidden"
+                    onChange={(e) => e.target.files && onDrop(Array.from(e.target.files))} />
+                </label>
+              </div>
+            </div>
 
-          {selected.size > 0 && (
-            <>
-              <span className="text-xs text-brand-400">{selected.size}개 선택됨</span>
-              <select
-                value={moveTarget}
-                onChange={(e) => setMoveTarget(e.target.value)}
-                className="input text-xs py-1 w-32"
-              >
-                <option value="">이동 대상...</option>
-                {labels.filter((l) => l.name !== activeLabel).map((l) => (
-                  <option key={l.name} value={l.name}>{l.name}</option>
-                ))}
-              </select>
-              <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">이동</button>
-              <button onClick={deleteSelected} className="btn-danger text-xs py-1">삭제</button>
-            </>
-          )}
-
-          <div className="ml-auto flex items-center gap-2">
-            <button onClick={selectAll} className="text-xs text-gray-400 hover:text-gray-200">전체 선택</button>
-            <label className="btn-ghost text-xs py-1 cursor-pointer">
-              업로드
-              <input type="file" multiple accept="image/*" className="hidden"
-                onChange={(e) => e.target.files && onDrop(Array.from(e.target.files))} />
-            </label>
-          </div>
-        </div>
 
         {/* 그리드 */}
         <div className="flex-1 overflow-y-auto p-4">
-          {isDragActive && (
-            <div className="absolute inset-0 bg-brand-600/10 border-2 border-brand-500 border-dashed rounded-xl flex items-center justify-center z-10">
-              <p className="text-brand-400 text-lg font-medium">이미지를 놓으세요</p>
-            </div>
-          )}
+           {isDragActive && (
+             <div className="absolute inset-0 bg-brand-600/10 border-2 border-brand-500 border-dashed rounded-xl flex items-center justify-center z-10">
+               <p className="text-brand-400 text-lg font-medium">{t("dataset.drop_hint")}</p>
+             </div>
+           )}
+ 
+           {loading ? (
+             <div className="flex items-center justify-center h-32 text-gray-500 dark:text-gray-600 text-sm">{t("common.loading")}</div>
+           ) : images.length === 0 ? (
+             <div className="flex flex-col items-center justify-center h-32 text-gray-500 dark:text-gray-600 text-sm gap-2">
+               <span>{t("dataset.empty_images")}</span>
+               <span className="text-xs">{t("dataset.empty_hint")}</span>
+             </div>
+           ) : (
 
-          {loading ? (
-            <div className="flex items-center justify-center h-32 text-gray-600 text-sm">로딩 중...</div>
-          ) : images.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-32 text-gray-600 text-sm gap-2">
-              <span>이미지 없음</span>
-              <span className="text-xs">이미지를 드래그하거나 업로드 버튼을 사용하세요</span>
-            </div>
-          ) : (
             <div className="grid grid-cols-6 gap-2">
               {images.map((img) => {
                 const sel = selected.has(img.id);
@@ -256,15 +301,16 @@ export default function Dataset() {
         </div>
 
         {/* 페이지네이션 */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-center gap-2 py-3 border-t border-gray-800 shrink-0">
-            <button onClick={() => loadImages(activeLabel!, page - 1)} disabled={page <= 1}
-              className="btn-ghost text-xs py-1 px-3">이전</button>
-            <span className="text-xs text-gray-400">{page} / {totalPages}</span>
-            <button onClick={() => loadImages(activeLabel!, page + 1)} disabled={page >= totalPages}
-              className="btn-ghost text-xs py-1 px-3">다음</button>
+         {totalPages > 1 && (
+           <div className="flex items-center justify-center gap-2 py-3 border-t border-gray-200 dark:border-gray-800 shrink-0">
+             <button onClick={() => loadImages(activeLabel!, page - 1)} disabled={page <= 1}
+               className="btn-ghost text-xs py-1 px-3">{t("dataset.prev")}</button>
+             <span className="text-xs text-gray-500 dark:text-gray-400">{page} / {totalPages}</span>
+             <button onClick={() => loadImages(activeLabel!, page + 1)} disabled={page >= totalPages}
+               className="btn-ghost text-xs py-1 px-3">{t("dataset.next")}</button>
            </div>
          )}
+
        </div>
      </div>
      {previewImg && (

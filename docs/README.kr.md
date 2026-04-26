@@ -37,6 +37,8 @@ uv sync --extra rocm   # AMD GPU
 uv sync --extra arc    # Intel Arc GPU (XPU)
 ```
 
+> **Apple Silicon (M1/M2/M3/M4) 사용자**: 별도 extra 없이 `uv sync`만으로 충분합니다. MPS(Metal Performance Shaders) 가속이 기본 PyTorch 패키지에 포함되어 있으며, 학습 시 자동으로 감지·사용됩니다. AMP(혼합 정밀도)는 MPS에서 지원되지 않아 FP32로 학습되지만, CPU 대비 훨씬 빠릅니다.
+
 > **Intel Arc 사용자**: `uv sync --extra arc` 후 스크립트 실행 시 `uv run python` 대신 `.venv/bin/python` 또는 `uv run --extra arc python`을 사용하세요. `--extra arc` 없이 실행하면 uv가 CUDA 빌드 PyTorch를 재설치하여 XPU 지원이 깨질 수 있습니다.
 
 ### 3. 실행 (원샷)

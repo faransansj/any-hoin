@@ -15,8 +15,14 @@ __pycache__/
 .env
 
 # frontend
+node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/*.tsbuildinfo
+
+# local agent metadata
+.codex/
+.codex
 
 # thumbnails cache
 .thumbnails/

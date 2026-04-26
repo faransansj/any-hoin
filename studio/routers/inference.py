@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from PIL import Image
 
 import studio.characters as ch
+from model_loader import ModelLoader
 
 CHECKPOINT_DIR = Path("./checkpoints")
 IMG_SIZE       = 224
@@ -24,7 +25,6 @@ _loader = None
 def _get_loader():
     global _loader
     if _loader is None:
-        from main import ModelLoader
         _loader = ModelLoader.get()
     return _loader
 
@@ -74,7 +74,10 @@ async def predict(file: UploadFile = File(...)):
         raise HTTPException(503, f"Model load failed: {e}")
 
     content = await file.read()
-    img     = Image.open(io.BytesIO(content)).convert("RGB")
+    try:
+        img = Image.open(io.BytesIO(content)).convert("RGB")
+    except Exception:
+        raise HTTPException(400, "Unreadable image file")
 
     # top-K 예측
     img_np      = np.array(img)

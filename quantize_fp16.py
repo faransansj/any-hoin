@@ -31,6 +31,11 @@ FP16_PATH = CHECKPOINT_DIR / "best_model_fp16.pth"
 CLASS_MAP_PATH = CHECKPOINT_DIR / "class_map.json"
 
 
+def require_file(path: Path, purpose: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"{purpose} not found: {path}")
+
+
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -74,8 +79,13 @@ def main():
     device = get_device()
     print(f"디바이스: {device}")
 
+    require_file(CLASS_MAP_PATH, "class map")
+    require_file(FP32_PATH, "FP32 model")
+
     with open(CLASS_MAP_PATH) as f:
         num_classes = len(json.load(f))
+    if num_classes <= 0:
+        raise RuntimeError(f"class map is empty: {CLASS_MAP_PATH}")
     print(f"클래스 수: {num_classes}")
 
     # ── test dataloader ──────────────────────────

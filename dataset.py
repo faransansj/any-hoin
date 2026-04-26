@@ -102,14 +102,31 @@ class HoloDataset(Dataset):
         self.transform = transform
         self.split = split
 
-        # 클래스 목록 자동 생성 (폴더명 정렬)
-        classes = sorted(
-            [
-                d.name
-                for d in self.root_dir.iterdir()
-                if d.is_dir() and not d.name.startswith(".")
-            ]
+        top_dirs = sorted(
+            d for d in self.root_dir.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
         )
+        top_level_classes = {d.name for d in top_dirs}
+
+        # 전체 샘플 수집. others/<class>는 해당 class가 top-level에 존재하면
+        # 중복 라벨 오염을 피하기 위해 others 샘플에서 제외한다.
+        sample_paths_by_class: dict[str, list[str]] = {}
+        for cls_dir in top_dirs:
+            cls_samples = []
+            for f in sorted(cls_dir.rglob("*")):
+                if not f.is_file() or f.suffix.lower() not in self.VALID_EXT:
+                    continue
+                if cls_dir.name == "others":
+                    rel_parts = f.relative_to(cls_dir).parts
+                    if len(rel_parts) > 1 and rel_parts[0] in top_level_classes:
+                        continue
+                cls_samples.append(str(f))
+
+            if cls_samples:
+                sample_paths_by_class[cls_dir.name] = cls_samples
+
+        # 클래스 목록 자동 생성 (샘플이 있는 폴더명 정렬)
+        classes = sorted(sample_paths_by_class)
         self.class_to_idx = {cls: i for i, cls in enumerate(classes)}
         self.idx_to_class = {i: cls for cls, i in self.class_to_idx.items()}
         self.classes = classes
@@ -117,10 +134,8 @@ class HoloDataset(Dataset):
         # 전체 샘플 수집
         all_samples = []
         for cls in classes:
-            cls_dir = self.root_dir / cls
-            for f in cls_dir.iterdir():
-                if f.suffix.lower() in self.VALID_EXT:
-                    all_samples.append((str(f), self.class_to_idx[cls]))
+            for img_path in sample_paths_by_class[cls]:
+                all_samples.append((img_path, self.class_to_idx[cls]))
 
         # 재현 가능한 train/val/test split
         rng = np.random.default_rng(seed)
@@ -189,6 +204,12 @@ def build_dataloaders(
     train_ds = HoloDataset(root_dir, get_train_transforms(img_size), split="train")
     val_ds = HoloDataset(root_dir, get_val_transforms(img_size), split="val")
     test_ds = HoloDataset(root_dir, get_val_transforms(img_size), split="test")
+
+    if len(train_ds.classes) == 0 or len(train_ds.samples) == 0:
+        raise RuntimeError(
+            f"No training images found in {root_dir}. "
+            "Expected dataset/raw/<class>/ image folders."
+        )
 
     # 클래스 불균형 처리
     if use_weighted_sampler:

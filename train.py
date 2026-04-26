@@ -328,6 +328,11 @@ def train(args):
     )
 
     num_classes = len(train_ds.classes)
+    if num_classes <= 0 or len(train_ds.samples) == 0:
+        raise RuntimeError(
+            f"No training images found in {args.data_dir}. "
+            "Populate dataset/raw/<class>/ with images before training."
+        )
     print(f"클래스 수: {num_classes}")
 
     # 클래스 맵 저장
