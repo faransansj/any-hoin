@@ -10,6 +10,7 @@
     "add": "추가",
     "delete": "삭제",
     "edit": "수정",
+    "move": "이동",
     "search": "검색",
     "loading": "로딩 중...",
     "no_data": "데이터가 없습니다",
@@ -95,6 +96,13 @@
     "batch_progress": "배치",
     "speed": "속도",
     "eta": "남은 시간",
+    "monitoring_title": "백그라운드 모니터링",
+    "monitoring_hint": "다른 페이지로 이동해도 진행률은 탭 제목과 왼쪽 메뉴 상태로 갱신되고, 학습 종료 시 브라우저 알림을 보냅니다.",
+    "enable_notifications": "완료 알림 켜기",
+    "notification_granted": "알림 허용",
+    "notification_default": "알림 대기",
+    "notification_denied": "알림 차단",
+    "notification_unsupported": "알림 미지원",
     "log_title": "로그"
   },
   "export": {
@@ -133,6 +141,15 @@
     "classifying": "분류 중...",
     "empty_result": "이미지를 업로드하면 결과가 여기에 표시됩니다.",
     "top_k": "Top-5 Predictions",
-    "best_match": "Best match"
+    "best_match": "Best match",
+    "confidence_label": "confidence",
+    "confidence_hint_title": "해석 기준",
+    "confidence_hint": "confidence는 모델 softmax 확률입니다. 0.9274는 약 92.74% 신뢰도로 해당 클래스를 가장 가능성 높게 본다는 의미입니다.",
+    "api_example_title": "API 출력 예시",
+    "api_example_desc": "이미지를 업로드하면 실제 응답 JSON이 여기에 표시됩니다. 업로드 전에는 예시 값을 보여줍니다.",
+    "model_info_title": "모델 정보",
+    "model_info_desc": "현재 추론에 사용할 수 있는 모델 파일, 클래스 수, 학습 정확도입니다.",
+    "model_ready": "사용 가능",
+    "model_missing": "모델 없음"
   }
 }

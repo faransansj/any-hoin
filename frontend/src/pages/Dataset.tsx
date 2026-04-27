@@ -9,7 +9,7 @@ import { api } from "../api";
 import { useTranslation } from "react-i18next";
 import ImageModal from "../components/ImageModal";
 import { useJobStore } from "../store/jobStore";
-import type { ImageItem, JobState, Label } from "../types";
+import type { DatasetDiscovery, ImageItem, ImageSort, JobState, Label } from "../types";
 
 const PER_PAGE = 60;
 
@@ -26,6 +26,13 @@ export default function Dataset() {
   const [newLabelName, setNewLabelName] = useState("");
   const [moveTarget,   setMoveTarget]   = useState("");
   const [loading,      setLoading]      = useState(false);
+  const [discovery,    setDiscovery]    = useState<DatasetDiscovery | null>(null);
+  const [recovering,   setRecovering]   = useState(false);
+  const [labelSearch,  setLabelSearch]  = useState("");
+  const [labelSort,    setLabelSort]    = useState<"name_asc" | "name_desc" | "count_desc" | "count_asc">("name_asc");
+  const [lowOnly,      setLowOnly]      = useState(false);
+  const [imageSort,    setImageSort]    = useState<ImageSort>("name_asc");
+  const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
 
   // ── 라벨 목록 ──────────────────────────────────────────
   const loadLabels = useCallback(async () => {
@@ -37,23 +44,32 @@ export default function Dataset() {
     });
   }, []);
 
+  const loadDatasetDiscovery = useCallback(async () => {
+    const r = await api.get<DatasetDiscovery>("/characters/discover");
+    setDiscovery(r);
+  }, []);
+
   // ── 이미지 목록 ────────────────────────────────────────
   const loadImages = useCallback(async (label: string, p = 1) => {
     setLoading(true);
     try {
       const r = await api.get<{ total: number; images: ImageItem[] }>(
-        `/images?label=${encodeURIComponent(label)}&page=${p}&per_page=${PER_PAGE}`
+        `/images?label=${encodeURIComponent(label)}&page=${p}&per_page=${PER_PAGE}&sort=${imageSort}`
       );
       setImages(r.images);
       setTotalImages(r.total);
       setPage(p);
       setSelected(new Set());
+      setLastSelectedIndex(null);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [imageSort]);
 
-  useEffect(() => { void loadLabels(); }, [loadLabels]);
+  useEffect(() => {
+    void loadLabels();
+    void loadDatasetDiscovery();
+  }, [loadDatasetDiscovery, loadLabels]);
   useEffect(() => {
     if (activeLabel) {
       void loadImages(activeLabel, 1);
@@ -82,6 +98,7 @@ export default function Dataset() {
         if (dead) return;
         setCrawlState(status.state);
         await loadLabels();
+        await loadDatasetDiscovery();
         if (activeLabel) await loadImages(activeLabel, page);
       } catch (e) {
         console.error(e);
@@ -95,7 +112,7 @@ export default function Dataset() {
       dead = true;
       clearInterval(timer);
     };
-  }, [activeLabel, crawlState, loadImages, loadLabels, page, setCrawlState]);
+  }, [activeLabel, crawlState, loadDatasetDiscovery, loadImages, loadLabels, page, setCrawlState]);
 
   // ── 라벨 생성 ─────────────────────────────────────────
   async function createLabel() {
@@ -104,6 +121,7 @@ export default function Dataset() {
     await api.post("/labels", { name });
     setNewLabelName("");
     await loadLabels();
+    await loadDatasetDiscovery();
     setActiveLabel(name);
   }
 
@@ -112,6 +130,20 @@ export default function Dataset() {
     await api.delete(`/labels/${encodeURIComponent(name)}`);
     if (activeLabel === name) setActiveLabel(null);
     await loadLabels();
+    await loadDatasetDiscovery();
+  }
+
+  async function recoverDatasetCharacters() {
+    if (!discovery?.missing.length) return;
+    setRecovering(true);
+    try {
+      await api.post("/characters/recover", {
+        keys: discovery.missing.map((item) => item.key),
+      });
+      await loadDatasetDiscovery();
+    } finally {
+      setRecovering(false);
+    }
   }
 
   // ── 이미지 업로드 (드롭존) ─────────────────────────────
@@ -132,14 +164,37 @@ export default function Dataset() {
   });
 
   // ── 이미지 선택 ───────────────────────────────────────
-  function toggleImage(id: string) {
-    const next = new Set(selected);
-    next.has(id) ? next.delete(id) : next.add(id);
-    setSelected(next);
+  function toggleImage(id: string, index: number, range: boolean) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (range && lastSelectedIndex != null) {
+        const [start, end] = [lastSelectedIndex, index].sort((a, b) => a - b);
+        images.slice(start, end + 1).forEach((img) => next.add(img.id));
+      } else {
+        next.has(id) ? next.delete(id) : next.add(id);
+      }
+      return next;
+    });
+    setLastSelectedIndex(index);
   }
 
   function selectAll() {
     setSelected(new Set(images.map((i) => i.id)));
+  }
+
+  function clearSelection() {
+    setSelected(new Set());
+    setLastSelectedIndex(null);
+  }
+
+  function invertSelection() {
+    setSelected((prev) => {
+      const next = new Set<string>();
+      images.forEach((img) => {
+        if (!prev.has(img.id)) next.add(img.id);
+      });
+      return next;
+    });
   }
 
   // ── 이동 / 삭제 ───────────────────────────────────────
@@ -162,6 +217,18 @@ export default function Dataset() {
   }
 
   const totalPages = Math.ceil(totalImages / PER_PAGE);
+  const filteredLabels = labels
+    .filter((label) => {
+      const q = labelSearch.trim().toLowerCase();
+      if (lowOnly && !label.warning) return false;
+      return !q || label.name.toLowerCase().includes(q);
+    })
+    .sort((a, b) => {
+      if (labelSort === "name_desc") return b.name.localeCompare(a.name);
+      if (labelSort === "count_desc") return b.count - a.count;
+      if (labelSort === "count_asc") return a.count - b.count;
+      return a.name.localeCompare(b.name);
+    });
 
   return (
     <>
@@ -170,9 +237,9 @@ export default function Dataset() {
 
       {/* ── 좌측 라벨 패널 ─────────────────────── */}
       <aside className="w-52 bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
-        <div className="p-3 border-b border-gray-200 dark:border-gray-800">
-          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">{t("dataset.labels_title")}</p>
-          <div className="flex gap-1">
+	        <div className="p-3 border-b border-gray-200 dark:border-gray-800">
+	          <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">{t("dataset.labels_title")}</p>
+	          <div className="flex gap-1">
             <input
               value={newLabelName}
               onChange={(e) => setNewLabelName(e.target.value)}
@@ -180,13 +247,43 @@ export default function Dataset() {
               placeholder={t("dataset.new_label_placeholder")}
               className="input text-xs py-1"
             />
-            <button onClick={createLabel} className="btn-primary px-2 py-1 text-xs shrink-0">+</button>
-          </div>
-        </div>
+	            <button onClick={createLabel} className="btn-primary px-2 py-1 text-xs shrink-0">+</button>
+	          </div>
+            <div className="mt-2 space-y-1.5">
+              <input
+                value={labelSearch}
+                onChange={(e) => setLabelSearch(e.target.value)}
+                className="input text-xs py-1"
+                placeholder="라벨 검색..."
+              />
+              <select
+                value={labelSort}
+                onChange={(e) => setLabelSort(e.target.value as typeof labelSort)}
+                className="input text-xs py-1"
+              >
+                <option value="name_asc">이름 오름차순</option>
+                <option value="name_desc">이름 내림차순</option>
+                <option value="count_desc">이미지 많은 순</option>
+                <option value="count_asc">이미지 적은 순</option>
+              </select>
+              <label className="flex items-center gap-2 text-[11px] text-gray-500">
+                <input
+                  type="checkbox"
+                  checked={lowOnly}
+                  onChange={(e) => setLowOnly(e.target.checked)}
+                  className="accent-brand-500"
+                />
+                부족 라벨만 보기
+              </label>
+            </div>
+	        </div>
 
-        <div className="flex-1 overflow-y-auto py-2">
-          {labels.map((l) => (
-            <div
+	        <div className="flex-1 overflow-y-auto py-2">
+	          {filteredLabels.length === 0 && (
+	            <p className="px-3 py-6 text-xs text-gray-500">조건에 맞는 라벨이 없습니다.</p>
+	          )}
+	          {filteredLabels.map((l) => (
+	            <div
               key={l.name}
               onClick={() => setActiveLabel(l.name)}
               className={`group flex items-center px-3 py-2 cursor-pointer transition-colors ${
@@ -216,9 +313,9 @@ export default function Dataset() {
               </span>
               <span className="text-xs text-gray-500 dark:text-gray-600">{totalImages}{t("dataset.total_images")}</span>
  
-              {selected.size > 0 && (
-                <>
-                  <span className="text-xs text-brand-400">{t("dataset.selected_count", { count: selected.size })}</span>
+	              {selected.size > 0 && (
+	                <>
+	                  <span className="text-xs text-brand-400">{t("dataset.selected_count", { count: selected.size })}</span>
                   <select
                     value={moveTarget}
                     onChange={(e) => setMoveTarget(e.target.value)}
@@ -229,20 +326,53 @@ export default function Dataset() {
                       <option key={l.name} value={l.name}>{l.name}</option>
                     ))}
                   </select>
-                  <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">{t("common.move") || "이동"}</button>
-                  <button onClick={deleteSelected} className="btn-danger text-xs py-1">{t("common.delete")}</button>
-                </>
-              )}
- 
-              <div className="ml-auto flex items-center gap-2">
-                <button onClick={selectAll} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">{t("dataset.select_all")}</button>
-                <label className="btn-ghost text-xs py-1 cursor-pointer">
+                    <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">{t("common.move") || "이동"}</button>
+                    <button onClick={deleteSelected} className="btn-danger text-xs py-1">{t("common.delete")}</button>
+                    <button onClick={clearSelection} className="btn-ghost text-xs py-1">해제</button>
+	                </>
+	              )}
+
+	              <div className="ml-auto flex items-center gap-2">
+                  <select
+                    value={imageSort}
+                    onChange={(e) => setImageSort(e.target.value as ImageSort)}
+                    className="input text-xs py-1 w-32"
+                    disabled={!activeLabel}
+                  >
+                    <option value="name_asc">이름순</option>
+                    <option value="name_desc">이름 역순</option>
+                    <option value="newest">최신순</option>
+                    <option value="oldest">오래된순</option>
+                  </select>
+	                <button onClick={selectAll} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">{t("dataset.select_all")}</button>
+                  <button onClick={invertSelection} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">반전</button>
+	                <label className="btn-ghost text-xs py-1 cursor-pointer">
                   {t("dataset.upload_btn")}
                   <input type="file" multiple accept="image/*" className="hidden"
                     onChange={(e) => e.target.files && onDrop(Array.from(e.target.files))} />
                 </label>
               </div>
             </div>
+
+            {discovery && discovery.missing.length > 0 && (
+              <div className="mx-4 mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 flex items-start justify-between gap-3 shrink-0">
+                <div>
+                  <p className="text-xs font-semibold text-amber-300">
+                    기존 이미지 폴더 {discovery.missing.length}개가 characters.json에 등록되어 있지 않습니다.
+                  </p>
+                  <p className="text-[11px] text-amber-100/70 mt-1">
+                    세션 종료로 이미지가 삭제된 것은 아닙니다. 필요하면 현재 dataset/raw 폴더를 다시 캐릭터 목록에 등록하세요.
+                  </p>
+                </div>
+                <button
+                  onClick={recoverDatasetCharacters}
+                  disabled={recovering}
+                  className="shrink-0 text-xs px-3 py-1.5 rounded bg-amber-500 text-gray-950 hover:bg-amber-400 disabled:opacity-50"
+                >
+                  {recovering ? "불러오는 중" : "데이터셋 불러오기"}
+                </button>
+              </div>
+            )}
 
 
         {/* 그리드 */}
@@ -263,12 +393,12 @@ export default function Dataset() {
            ) : (
 
             <div className="grid grid-cols-6 gap-2">
-              {images.map((img) => {
+              {images.map((img, index) => {
                 const sel = selected.has(img.id);
                 return (
                      <div
                        key={img.id}
-                       onClick={() => toggleImage(img.id)}
+	                       onClick={(e) => toggleImage(img.id, index, e.shiftKey)}
                        className={`group relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
                          sel ? "border-brand-500 scale-95" : "border-transparent hover:border-gray-600"
                        }`}

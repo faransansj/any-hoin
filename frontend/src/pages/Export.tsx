@@ -11,11 +11,48 @@ import StatusBadge from "../components/StatusBadge";
 import { useJobStore } from "../store/jobStore";
 import type { ExportStatus, ModelMap, ModelsResponse, QuantFormat } from "../types";
 
-const QUANT_OPTIONS: { value: QuantFormat; label: string; desc: string; color: string }[] = [
-  { value: "fp16", label: "FP16", desc: "Float 16 — ~2× 압축, 정확도 무손실",      color: "text-yellow-300" },
-  { value: "int8", label: "INT8", desc: "Integer 8 — ~4× 압축, 미세 정확도 손실",  color: "text-orange-300" },
-  { value: "int4", label: "INT4", desc: "Integer 4 — ~8× 압축, 소폭 정확도 손실",  color: "text-red-300"    },
-  { value: "int2", label: "INT2", desc: "Integer 2 — ~16× 압축, 정확도 손실 있음", color: "text-pink-400"   },
+const QUANT_OPTIONS: {
+  value: QuantFormat;
+  label: string;
+  desc: string;
+  useCase: string;
+  risk: string;
+  recommended?: boolean;
+  color: string;
+}[] = [
+  {
+    value: "fp16",
+    label: "FP16",
+    desc: "약 2× 압축",
+    useCase: "GPU/ONNX 배포 전 기본 권장 옵션. 정확도 손실이 거의 없습니다.",
+    risk: "낮음",
+    recommended: true,
+    color: "text-yellow-300",
+  },
+  {
+    value: "int8",
+    label: "INT8",
+    desc: "약 4× 압축",
+    useCase: "모바일/CPU 추론처럼 용량과 속도가 중요할 때 실험용으로 적합합니다.",
+    risk: "중간",
+    color: "text-orange-300",
+  },
+  {
+    value: "int4",
+    label: "INT4",
+    desc: "약 8× 압축",
+    useCase: "모델 크기를 크게 줄여야 할 때만 사용합니다. 결과 검증이 필요합니다.",
+    risk: "높음",
+    color: "text-red-300",
+  },
+  {
+    value: "int2",
+    label: "INT2",
+    desc: "약 16× 압축",
+    useCase: "극단적인 용량 제한 실험용입니다. 실제 서비스 기본값으로는 권장하지 않습니다.",
+    risk: "매우 높음",
+    color: "text-pink-400",
+  },
 ];
 
 const QUANT_KEYS: QuantFormat[] = ["fp16", "int8", "int4", "int2"];
@@ -89,17 +126,26 @@ export default function Export() {
           </div>
 
           {/* 선택된 형식 정보 */}
-          <div className="rounded-lg bg-gray-800/60 px-3 py-2 space-y-1 text-xs text-gray-400">
+          <div className="rounded-lg bg-gray-800/60 px-3 py-2 space-y-2 text-xs text-gray-400">
             {QUANT_OPTIONS.map((o) => {
               const entry = models?.[o.value];
               return (
-                <div key={o.value} className="flex items-center justify-between">
-                  <span className={`font-medium ${o.color}`}>{o.label}</span>
-                  <span>
-                    {entry?.exists
-                      ? <span className="text-green-400">{entry.size_mb} MB ✓</span>
-                      : <span className="text-gray-600">미변환</span>}
-                  </span>
+                <div key={o.value} className={`rounded-md border p-2 ${o.value === format ? "border-brand-500/60 bg-brand-600/10" : "border-gray-700/70 bg-gray-900/40"}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`font-semibold ${o.color}`}>{o.label}</span>
+                      {o.recommended && (
+                        <span className="rounded-full bg-green-500/15 px-1.5 py-0.5 text-[10px] text-green-300">권장</span>
+                      )}
+                    </div>
+                    <span>
+                      {entry?.exists
+                        ? <span className="text-green-400">{entry.size_mb} MB ✓</span>
+                        : <span className="text-gray-600">미변환</span>}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-gray-400">{o.useCase}</p>
+                  <p className="mt-1 text-[10px] text-gray-500">정확도 손실 위험: {o.risk} · {o.desc}</p>
                 </div>
               );
             })}

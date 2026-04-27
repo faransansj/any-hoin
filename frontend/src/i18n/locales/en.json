@@ -10,6 +10,7 @@
     "add": "Add",
     "delete": "Delete",
     "edit": "Edit",
+    "move": "Move",
     "search": "Search",
     "loading": "Loading...",
     "no_data": "No data available",
@@ -95,6 +96,13 @@
     "batch_progress": "Batch",
     "speed": "Speed",
     "eta": "Remaining Time",
+    "monitoring_title": "Background Monitoring",
+    "monitoring_hint": "Progress keeps updating in the tab title and sidebar after you leave this page, and a browser notification is sent when training finishes.",
+    "enable_notifications": "Enable completion notifications",
+    "notification_granted": "Notifications on",
+    "notification_default": "Notifications pending",
+    "notification_denied": "Notifications blocked",
+    "notification_unsupported": "Notifications unsupported",
     "log_title": "Logs"
   },
   "export": {
@@ -133,6 +141,15 @@
     "classifying": "Classifying...",
     "empty_result": "Results will appear here after uploading an image.",
     "top_k": "Top-5 Predictions",
-    "best_match": "Best match"
+    "best_match": "Best match",
+    "confidence_label": "confidence",
+    "confidence_hint_title": "How to read it",
+    "confidence_hint": "Confidence is the model softmax probability. 0.9274 means the model assigns about 92.74% probability to that class.",
+    "api_example_title": "API Output Example",
+    "api_example_desc": "After uploading an image, the actual response JSON appears here. Before upload, this panel shows sample values.",
+    "model_info_title": "Model Info",
+    "model_info_desc": "Available inference model files, class count, and training accuracy.",
+    "model_ready": "Ready",
+    "model_missing": "No model"
   }
 }

@@ -5,8 +5,22 @@
  * onMetric: metric 이벤트 콜백 (학습 전용)
  */
 import { useEffect, useRef, useState } from "react";
-import type { JobState, TrainMetric, TrainProgress } from "../types";
+import type { CrawlHealthResponse, CrawlProgress, JobState, TrainMetric, TrainProgress } from "../types";
 import { api } from "../api";
+
+const TRAIN_EVENT_PREFIX = "__HOLOSCOPE_TRAIN_EVENT__ ";
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const TQDM_RE = /^\s*(train|val):\s+\d+%\|/;
+
+function normalizeLogLine(line: string): string | null {
+  let clean = line.replace(ANSI_RE, "").replace(/\0/g, "").split("\r").at(-1)?.trimEnd() ?? "";
+  if (clean.includes(TRAIN_EVENT_PREFIX)) {
+    clean = clean.split(TRAIN_EVENT_PREFIX, 1)[0].trimEnd();
+  }
+  if (!clean.trim()) return null;
+  if (TQDM_RE.test(clean)) return null;
+  return clean;
+}
 
 function ClipboardIcon() {
   return (
@@ -31,6 +45,8 @@ interface Props {
   onState?:    (s: JobState) => void;
   onMetric?:   (m: TrainMetric) => void;
   onProgress?: (p: TrainProgress) => void;
+  onCrawlProgress?: (p: CrawlProgress) => void;
+  onCrawlHealth?:   (h: CrawlHealthResponse) => void;
   maxLines?:   number;
 }
 
@@ -40,6 +56,8 @@ export default function JobConsole({
   onState,
   onMetric,
   onProgress,
+  onCrawlProgress,
+  onCrawlHealth,
   maxLines = 400,
 }: Props) {
   const [lines, setLines] = useState<string[]>([]);
@@ -75,8 +93,10 @@ export default function JobConsole({
         try {
           const msg = JSON.parse(ev.data as string);
           if (msg.type === "log") {
+            const line = normalizeLogLine(msg.data as string);
+            if (line === null) return;
             setLines((prev) => {
-              const next = [...prev, msg.data as string];
+              const next = [...prev, line];
               return next.length > maxLines ? next.slice(-maxLines) : next;
             });
           } else if (msg.type === "state" && onState) {
@@ -85,6 +105,10 @@ export default function JobConsole({
             onMetric(msg.data as TrainMetric);
           } else if (msg.type === "progress" && onProgress) {
             onProgress(msg.data as TrainProgress);
+          } else if (msg.type === "crawl_progress" && onCrawlProgress) {
+            onCrawlProgress(msg.data as CrawlProgress);
+          } else if (msg.type === "crawl_health" && onCrawlHealth) {
+            onCrawlHealth(msg.data as CrawlHealthResponse);
           }
         } catch {
           /* 무시 */

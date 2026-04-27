@@ -9,6 +9,7 @@ Danbooru Crawler for Hololive Character Classification
 """
 
 import io
+import json
 import os
 import time
 import hashlib
@@ -153,6 +154,7 @@ POSTS_PER_PAGE  = 100
 QUEUE_PAGE_FACTOR = 3           # 필터/중복/다운로드 실패 여유분
 MIN_QUEUE_PAGES = 10
 PAGE_SLEEP      = 0.5           # API 페이지 요청 간격 (초)
+CRAWL_EVENT_PREFIX = "__HOLOSCOPE_CRAWL_EVENT__ "
 
 
 class DanbooruCrawler:
@@ -162,14 +164,105 @@ class DanbooruCrawler:
         api_key: str = "",
         output_dir: Path = Path("./dataset/raw"),
         workers: int = 4,
+        emit_events: bool = False,
     ):
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "HoloScope-Crawler/1.0"
         self.auth = (username, api_key) if username else None
         self.output_dir = Path(output_dir)
         self.workers = workers
+        self.emit_events = emit_events
         self._hash_lock = Lock()
         self.seen_hashes: set[str] = set()
+        self._last_progress_emit = 0.0
+        self._run_context: dict = {}
+        self.health = {
+            "account_mode": "authenticated" if self.auth else "anonymous",
+            "api_requests": 0,
+            "api_errors": 0,
+            "download_errors": 0,
+            "rate_limited": False,
+            "last_status": None,
+            "last_error": None,
+            "retry_after": None,
+            "last_api_at": None,
+            "last_latency_ms": None,
+        }
+
+    def _emit_event(self, event: str, payload: dict) -> None:
+        if not self.emit_events:
+            return
+        print(
+            CRAWL_EVENT_PREFIX + json.dumps({"event": event, **payload}, ensure_ascii=False),
+            flush=True,
+        )
+
+    def _health_snapshot(self) -> dict:
+        return dict(self.health)
+
+    def _eta(self, remaining: int, speed: float) -> int:
+        if remaining <= 0:
+            return 0
+        if speed <= 0:
+            return -1
+        return int(remaining / speed)
+
+    def _emit_progress(
+        self,
+        *,
+        char_name: str,
+        char_index: int,
+        phase: str,
+        collected: int,
+        target: int,
+        char_started_at: float,
+        queue_size: int = 0,
+        force: bool = False,
+        status: str | None = None,
+    ) -> None:
+        if not self.emit_events:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_progress_emit < 1.0:
+            return
+        self._last_progress_emit = now
+
+        ctx = self._run_context
+        started_at = float(ctx.get("started_at") or now)
+        completed_images = int(ctx.get("completed_images") or 0)
+        total_target = int(ctx.get("total_target") or target)
+        total_downloaded = min(completed_images + collected, total_target)
+        elapsed = max(now - started_at, 0.001)
+        speed = total_downloaded / elapsed if total_downloaded > 0 else 0.0
+
+        char_elapsed = max(now - char_started_at, 0.001)
+        char_speed = max(collected - int(ctx.get("current_existing") or 0), 0) / char_elapsed
+        char_remaining = max(target - collected, 0)
+        total_remaining = max(total_target - total_downloaded, 0)
+
+        self._emit_event("progress", {
+            "current_character": char_name,
+            "current_index": char_index,
+            "total_characters": int(ctx.get("total_characters") or 0),
+            "phase": phase,
+            "status": status,
+            "char_downloaded": collected,
+            "char_target": target,
+            "char_queue": queue_size,
+            "char_pct": round((collected / target) * 100, 2) if target > 0 else 0,
+            "char_eta_sec": self._eta(char_remaining, char_speed),
+            "completed_characters": int(ctx.get("completed_characters") or 0),
+            "included": int(ctx.get("included") or 0),
+            "skipped": int(ctx.get("skipped") or 0),
+            "below_threshold": int(ctx.get("below_threshold") or 0),
+            "total_downloaded": total_downloaded,
+            "total_target": total_target,
+            "total_pct": round((total_downloaded / total_target) * 100, 2) if total_target > 0 else 0,
+            "overall_eta_sec": self._eta(total_remaining, speed),
+            "speed_img_s": round(speed, 3),
+            "health": self._health_snapshot(),
+            "updated_at": time.time(),
+        })
 
     # ── API ──────────────────────────────────
 
@@ -179,6 +272,8 @@ class DanbooruCrawler:
             "limit": POSTS_PER_PAGE,
             "page":  page,
         }
+        started = time.monotonic()
+        self.health["api_requests"] += 1
         try:
             r = self.session.get(
                 f"{BASE_URL}/posts.json",
@@ -186,9 +281,17 @@ class DanbooruCrawler:
                 auth=self.auth,
                 timeout=15,
             )
+            self.health["last_status"] = r.status_code
+            self.health["last_api_at"] = time.time()
+            self.health["last_latency_ms"] = int((time.monotonic() - started) * 1000)
+            self.health["retry_after"] = r.headers.get("Retry-After")
+            self.health["rate_limited"] = r.status_code == 429
             r.raise_for_status()
+            self.health["last_error"] = None
             return r.json()
         except Exception as e:
+            self.health["api_errors"] += 1
+            self.health["last_error"] = str(e)
             console.print(f"  [red]API 오류:[/] {e}")
             return []
 
@@ -198,6 +301,12 @@ class DanbooruCrawler:
         """단일 이미지 다운로드. 반환값: 'ok' | 'dup' | 'invalid' | 'error'"""
         try:
             r = self.session.get(url, timeout=20)
+            if r.status_code == 429:
+                self.health["rate_limited"] = True
+                self.health["last_status"] = 429
+                self.health["retry_after"] = r.headers.get("Retry-After")
+                self.health["download_errors"] += 1
+                return "error"
             r.raise_for_status()
 
             # MD5 중복 체크 (세션 내)
@@ -216,15 +325,27 @@ class DanbooruCrawler:
             save_path.write_bytes(r.content)
             return "ok"
         except Exception:
+            self.health["download_errors"] += 1
             return "error"
 
     def _collect_queue(
-        self, tag: str, char_dir: Path, need: int
+        self,
+        tag: str,
+        char_dir: Path,
+        need: int,
+        *,
+        char_name: str = "",
+        char_index: int = 1,
+        collected: int = 0,
+        target: int | None = None,
+        char_started_at: float | None = None,
     ) -> list[tuple[str, Path]]:
         """다운로드할 (url, 저장경로) 목록을 API에서 수집 (순차적으로 rate-limit 준수)"""
         queue: list[tuple[str, Path]] = []
         seen_paths: set[Path] = set()
         page = 1
+        target = target if target is not None else need + collected
+        char_started_at = char_started_at if char_started_at is not None else time.monotonic()
         max_pages = max(
             MIN_QUEUE_PAGES,
             ((need + POSTS_PER_PAGE - 1) // POSTS_PER_PAGE) * QUEUE_PAGE_FACTOR,
@@ -258,6 +379,15 @@ class DanbooruCrawler:
                 queue.append((file_url, save_path))
 
             page += 1
+            self._emit_progress(
+                char_name=char_name,
+                char_index=char_index,
+                phase="collecting",
+                collected=collected,
+                target=target,
+                queue_size=len(queue),
+                char_started_at=char_started_at,
+            )
             if len(queue) < need:
                 time.sleep(PAGE_SLEEP)
 
@@ -273,6 +403,8 @@ class DanbooruCrawler:
         min_images: int,
         progress: Progress,
         task_id,
+        char_index: int,
+        total_chars: int,
     ) -> tuple[str, int]:
         """(status, count) 반환.  status: 'included' | 'skipped' | 'below_threshold'"""
         char_dir = self.output_dir / char_name
@@ -283,6 +415,17 @@ class DanbooruCrawler:
             f for f in char_dir.iterdir()
             if f.suffix.lower() in ALLOWED_EXT
         ])
+        char_started_at = time.monotonic()
+        self._run_context["current_existing"] = existing
+        self._emit_progress(
+            char_name=char_name,
+            char_index=char_index,
+            phase="starting",
+            collected=existing,
+            target=max_images,
+            char_started_at=char_started_at,
+            force=True,
+        )
 
         # 이미 충분히 수집된 경우
         if existing >= max_images:
@@ -292,13 +435,42 @@ class DanbooruCrawler:
                 total=max_images,
                 description=f"[dim]{char_name:<26}[/]",
             )
+            self._emit_progress(
+                char_name=char_name,
+                char_index=char_index,
+                phase="done",
+                status="skipped",
+                collected=existing,
+                target=max_images,
+                char_started_at=char_started_at,
+                force=True,
+            )
             return "skipped", existing
 
         collected = existing
         progress.update(task_id, completed=collected, total=max_images)
 
         # 필요한 이미지 목록 수집 (API 순차 호출)
-        queue = self._collect_queue(tag, char_dir, max_images - collected)
+        queue = self._collect_queue(
+            tag,
+            char_dir,
+            max_images - collected,
+            char_name=char_name,
+            char_index=char_index,
+            collected=collected,
+            target=max_images,
+            char_started_at=char_started_at,
+        )
+        self._emit_progress(
+            char_name=char_name,
+            char_index=char_index,
+            phase="downloading",
+            collected=collected,
+            target=max_images,
+            queue_size=len(queue),
+            char_started_at=char_started_at,
+            force=True,
+        )
 
         # 병렬 다운로드
         with ThreadPoolExecutor(max_workers=self.workers) as executor:
@@ -310,6 +482,15 @@ class DanbooruCrawler:
                 if future.result() == "ok":
                     collected += 1
                     progress.update(task_id, completed=min(collected, max_images))
+                    self._emit_progress(
+                        char_name=char_name,
+                        char_index=char_index,
+                        phase="downloading",
+                        collected=collected,
+                        target=max_images,
+                        queue_size=len(queue),
+                        char_started_at=char_started_at,
+                    )
 
         if collected < min_images:
             return "below_threshold", collected
@@ -398,6 +579,19 @@ class DanbooruCrawler:
         """members가 None이면 HOLOLIVE_MEMBERS 전체를 크롤."""
         target = members if members is not None else HOLOLIVE_MEMBERS
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        total_chars = len(target)
+        total_target = total_chars * max_images
+        self._run_context = {
+            "started_at": time.monotonic(),
+            "total_characters": total_chars,
+            "total_target": total_target,
+            "completed_characters": 0,
+            "completed_images": 0,
+            "included": 0,
+            "skipped": 0,
+            "below_threshold": 0,
+            "current_existing": 0,
+        }
 
         auth_label = (
             f"[cyan]{self.auth[0]}[/]" if self.auth else "[yellow]익명[/yellow] (rate limit 있음)"
@@ -414,6 +608,15 @@ class DanbooruCrawler:
             )
         )
         console.print()
+        self._emit_event("start", {
+            "total_characters": total_chars,
+            "min_images": min_images,
+            "max_images": max_images,
+            "workers": self.workers,
+            "total_target": total_target,
+            "health": self._health_snapshot(),
+            "updated_at": time.time(),
+        })
 
         results: dict[str, list] = {
             "included":        [],
@@ -428,20 +631,21 @@ class DanbooruCrawler:
             MofNCompleteColumn(),
             TimeElapsedColumn(),
             console=console,
+            disable=self.emit_events,
         ) as progress:
             overall = progress.add_task(
                 f"[bold cyan]{'전체 진행':<26}[/]",
                 total=len(target),
             )
 
-            for char_name, tag in target.items():
+            for idx, (char_name, tag) in enumerate(target.items(), start=1):
                 task_id = progress.add_task(
                     f"[yellow]{char_name:<26}[/]",
                     total=max_images,
                 )
 
                 status, count = self.crawl_character(
-                    char_name, tag, max_images, min_images, progress, task_id
+                    char_name, tag, max_images, min_images, progress, task_id, idx, total_chars
                 )
 
                 if status == "included":
@@ -450,6 +654,7 @@ class DanbooruCrawler:
                         description=f"[green]✓ {char_name:<25}[/]",
                     )
                     results["included"].append((char_name, count))
+                    self._run_context["included"] += 1
 
                 elif status == "skipped":
                     progress.update(
@@ -457,6 +662,7 @@ class DanbooruCrawler:
                         description=f"[dim]  {char_name:<25}[/]",
                     )
                     results["skipped"].append((char_name, count))
+                    self._run_context["skipped"] += 1
 
                 else:  # below_threshold
                     progress.update(
@@ -465,10 +671,32 @@ class DanbooruCrawler:
                     )
                     self._move_to_others(char_name)
                     results["below_threshold"].append((char_name, count))
+                    self._run_context["below_threshold"] += 1
 
                 progress.update(overall, advance=1)
+                self._run_context["completed_characters"] += 1
+                self._emit_progress(
+                    char_name=char_name,
+                    char_index=idx,
+                    phase="done",
+                    status=status,
+                    collected=count,
+                    target=max_images,
+                    char_started_at=time.monotonic(),
+                    force=True,
+                )
+                self._run_context["completed_images"] += min(count, max_images)
 
         self._print_summary(results)
+        self._emit_event("complete", {
+            "included": len(results["included"]),
+            "skipped": len(results["skipped"]),
+            "below_threshold": len(results["below_threshold"]),
+            "total_downloaded": int(self._run_context.get("completed_images") or 0),
+            "total_target": total_target,
+            "health": self._health_snapshot(),
+            "updated_at": time.time(),
+        })
         return results
 
     def _print_summary(self, results: dict) -> None:
@@ -574,6 +802,11 @@ if __name__ == "__main__":
         default="", metavar="FILE",
         help='커스텀 캐릭터 JSON 파일: {"key": "danbooru_tag", ...}. 지정 시 --members 무시.',
     )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="Studio UI용 구조화 진행 이벤트를 출력하고 Rich 진행바를 비활성화합니다.",
+    )
     args = parser.parse_args()
 
     # 우선순위: --tags-file > --members > 전체(HOLOLIVE_MEMBERS)
@@ -596,4 +829,5 @@ if __name__ == "__main__":
         api_key=args.api_key,
         output_dir=Path(args.output_dir),
         workers=args.workers,
+        emit_events=args.events,
     ).run(min_images=args.min_images, max_images=args.max_images, members=members)

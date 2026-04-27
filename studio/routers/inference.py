@@ -39,6 +39,9 @@ def model_info():
     fp32 = (CHECKPOINT_DIR / "best_model.pth").exists()
     onnx = (CHECKPOINT_DIR / "best_model.onnx").exists()
     fp16 = (CHECKPOINT_DIR / "best_model_fp16.pth").exists()
+    int8 = (CHECKPOINT_DIR / "best_model_int8.pth").exists()
+    int4 = (CHECKPOINT_DIR / "best_model_int4.pth").exists()
+    int2 = (CHECKPOINT_DIR / "best_model_int2.pth").exists()
 
     config_path = CHECKPOINT_DIR / "config.json"
     config = {}
@@ -49,13 +52,32 @@ def model_info():
         except (json.JSONDecodeError, OSError):
             pass
 
+    class_map_path = CHECKPOINT_DIR / "class_map.json"
+    class_count = None
+    if class_map_path.exists():
+        try:
+            with open(class_map_path, encoding="utf-8") as f:
+                class_count = len(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            class_count = None
+
+    loaded_backend = None
+    if _loader is not None:
+        loaded_backend = getattr(_loader, "backend", None)
+
     return {
         "fp32_available": fp32,
         "fp16_available": fp16,
+        "int8_available": int8,
+        "int4_available": int4,
+        "int2_available": int2,
         "onnx_available": onnx,
-        "num_classes":    config.get("num_classes"),
+        "num_classes":    config.get("num_classes") or class_count,
         "best_val_acc":   config.get("best_val_acc"),
         "test_acc":       config.get("test_acc"),
+        "preferred_backend": "onnx" if onnx else "torch" if fp32 else None,
+        "loaded_backend": loaded_backend,
+        "model_ready": bool((onnx or fp32) and class_count),
     }
 
 

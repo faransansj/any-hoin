@@ -12,12 +12,24 @@ import os
 import sys
 import json
 import argparse
+import time
+import warnings
 from pathlib import Path
 
 # triton-xpu (Intel Arc 용) 은 torch/_dynamo 가 기대하는 triton.language 등의
 # 서브 API 를 구현하지 않는다. 영구적으로 None 으로 마스킹해 ImportError 를
 # 유발함으로써 torch/_dynamo / IPEX 가 triton-free 경로로 동작하게 한다.
 sys.modules.setdefault("triton", None)  # type: ignore[arg-type]
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+warnings.filterwarnings("ignore", message=r".*Corrupt EXIF data.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Possibly corrupt EXIF data.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Truncated File Read.*", category=UserWarning)
 
 import torch
 import torch.nn as nn
@@ -47,7 +59,7 @@ def _ipex_version_ok() -> bool:
             print(
                 f"[WARN] IPEX {ipex_ver} 는 torch {ipex_mm}.x 용이지만 "
                 f"torch {torch.__version__} 가 설치돼 있습니다. "
-                f"IPEX 를 건너뜁니다 (uv sync --extra arc 로 버전을 맞추세요)."
+                "IPEX 최적화만 건너뜁니다. XPU 자체는 torch.xpu가 사용 가능하면 동작합니다."
             )
             return False
         return True
@@ -56,7 +68,7 @@ def _ipex_version_ok() -> bool:
 
 
 try:
-    if _ipex_version_ok():
+    if "+xpu" in torch.__version__ and _ipex_version_ok():
         import intel_extension_for_pytorch as ipex  # Intel Arc XPU 지원
         IPEX_AVAILABLE = True
     else:
@@ -65,9 +77,72 @@ except Exception:
     IPEX_AVAILABLE = False
 
 
+TRAIN_EVENT_PREFIX = "__HOLOSCOPE_TRAIN_EVENT__ "
+
+
+def emit_train_event(event_type: str, data: dict):
+    """Studio가 tqdm 문자열 대신 구조화 이벤트를 파싱하도록 JSON 라인을 출력."""
+    payload = {"type": event_type, "data": data}
+    print(TRAIN_EVENT_PREFIX + json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+def emit_progress_event(
+    split: str,
+    batch_cur: int,
+    batch_total: int,
+    started_at: float,
+    avg_loss: float | None = None,
+    avg_acc: float | None = None,
+):
+    elapsed = max(time.monotonic() - started_at, 1e-6)
+    speed_it_s = batch_cur / elapsed
+    remaining = max(batch_total - batch_cur, 0)
+    eta_sec = remaining / speed_it_s if speed_it_s > 0 else -1.0
+    data = {
+        "split": split,
+        "pct": int((batch_cur / batch_total) * 100) if batch_total > 0 else 0,
+        "batch_cur": batch_cur,
+        "batch_total": batch_total,
+        "eta_sec": round(eta_sec, 1),
+        "speed_it_s": round(speed_it_s, 2),
+    }
+    if avg_loss is not None:
+        data["avg_loss"] = round(avg_loss, 4)
+    if avg_acc is not None:
+        data["avg_acc"] = round(avg_acc, 4)
+    emit_train_event("progress", data)
+
+
+def emit_metric_event(
+    phase: int,
+    epoch: int,
+    total_epochs: int,
+    train_loss: float,
+    train_acc: float,
+    val_loss: float,
+    val_acc: float,
+):
+    emit_train_event(
+        "metric",
+        {
+            "phase": phase,
+            "epoch": epoch,
+            "total_epochs": total_epochs,
+            "train_loss": round(train_loss, 4),
+            "train_acc": round(train_acc, 4),
+            "val_loss": round(val_loss, 4),
+            "val_acc": round(val_acc, 4),
+        },
+    )
+
+
 # ──────────────────────────────────────────────
 # 디바이스 감지
 # ──────────────────────────────────────────────
+
+
+class DeviceUnavailableError(RuntimeError):
+    """요청한 가속 장치를 현재 PyTorch 환경에서 사용할 수 없음."""
 
 
 def _xpu_ready() -> bool:
@@ -77,9 +152,44 @@ def _xpu_ready() -> bool:
     if "+xpu" not in torch.__version__:
         return False
     try:
-        return torch.xpu.is_available()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return torch.xpu.is_available()
     except Exception:
         return False
+
+
+def _xpu_unavailable_message(option: str) -> str:
+    if "+xpu" not in torch.__version__:
+        return (
+            f"{option} 를 지정했지만 현재 PyTorch는 XPU 빌드가 아닙니다.\n"
+            f"  - installed torch: {torch.__version__}\n"
+            "  - XPU 학습에는 '+xpu' PyTorch 빌드가 필요합니다.\n"
+            "  - Intel Arc를 사용하려면: uv sync --extra arc\n"
+            "  - NVIDIA/CUDA 빌드를 쓰는 환경에서는 device를 auto/cuda/cpu로 선택하세요."
+        )
+    return (
+        f"{option} 를 지정했지만 torch.xpu.is_available() == False 입니다.\n"
+        "  1) Intel GPU 드라이버/Level Zero 설치 확인\n"
+        "  2) 현재 사용자가 render/video 그룹에 포함됐는지 확인\n"
+        "  3) uv sync --extra arc 로 XPU 빌드를 설치했는지 확인\n"
+        "  4) docs/intel_arc_setup.md 참조"
+    )
+
+
+def _require_device_available(device: torch.device, option: str):
+    if device.type == "xpu" and not _xpu_ready():
+        raise DeviceUnavailableError(_xpu_unavailable_message(option))
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise DeviceUnavailableError(
+            f"{option} 를 지정했지만 CUDA를 사용할 수 없습니다.\n"
+            f"  - installed torch: {torch.__version__}\n"
+            "  - NVIDIA GPU/드라이버/CUDA PyTorch 빌드를 확인하거나 auto/cpu를 선택하세요."
+        )
+    if device.type == "mps" and not torch.backends.mps.is_available():
+        raise DeviceUnavailableError(
+            f"{option} 를 지정했지만 Apple MPS를 사용할 수 없습니다. auto/cpu를 선택하세요."
+        )
 
 
 def detect_device(
@@ -89,16 +199,16 @@ def detect_device(
     if force_cpu:
         return torch.device("cpu")
     if device_str:
-        return torch.device(device_str)
+        if device_str.lower() == "auto":
+            device_str = ""
+        else:
+            device = torch.device(device_str)
+            _require_device_available(device, f"--device {device_str}")
+            return device
     if force_xpu:
         if _xpu_ready():
             return torch.device("xpu")
-        raise RuntimeError(
-            "--xpu 플래그를 지정했지만 Intel Arc XPU를 사용할 수 없습니다.\n"
-            "  1) uv sync --extra arc 로 XPU 빌드 설치\n"
-            "  2) Intel GPU 드라이버 설치 확인\n"
-            "  3) docs/intel_arc_setup.md 참조"
-        )
+        raise DeviceUnavailableError(_xpu_unavailable_message("--xpu"))
     if _xpu_ready():
         return torch.device("xpu")
     if torch.cuda.is_available():
@@ -159,11 +269,22 @@ def unfreeze_all(model: nn.Module):
 
 
 def train_epoch(
-    model, loader, criterion, optimizer, device, scaler, use_amp, accumulation_steps=1
+    model,
+    loader,
+    criterion,
+    optimizer,
+    device,
+    scaler,
+    use_amp,
+    accumulation_steps=1,
+    progress_callback=None,
 ):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
     optimizer.zero_grad(set_to_none=True)
+    total_batches = len(loader)
+    started_at = time.monotonic()
+    last_progress_at = 0.0
 
     for i, (imgs, labels) in enumerate(tqdm(loader, desc="  train", leave=False)):
         imgs, labels = imgs.to(device), labels.to(device)
@@ -191,15 +312,33 @@ def train_epoch(
         correct += (outputs.argmax(1) == labels).sum().item()
         total += imgs.size(0)
 
+        batch_cur = i + 1
+        now = time.monotonic()
+        if progress_callback and (
+            batch_cur == total_batches or now - last_progress_at >= 1.0
+        ):
+            progress_callback(
+                "train",
+                batch_cur,
+                total_batches,
+                started_at,
+                total_loss / max(total, 1),
+                correct / max(total, 1),
+            )
+            last_progress_at = now
+
     return total_loss / total, correct / total
 
 
 @torch.no_grad()
-def val_epoch(model, loader, criterion, device, use_amp):
+def val_epoch(model, loader, criterion, device, use_amp, progress_callback=None):
     model.eval()
     total_loss, correct, total = 0.0, 0, 0
+    total_batches = len(loader)
+    started_at = time.monotonic()
+    last_progress_at = 0.0
 
-    for imgs, labels in tqdm(loader, desc="  val", leave=False):
+    for i, (imgs, labels) in enumerate(tqdm(loader, desc="  val", leave=False)):
         imgs, labels = imgs.to(device), labels.to(device)
 
         with torch.amp.autocast(device_type=device.type, enabled=use_amp):
@@ -209,6 +348,21 @@ def val_epoch(model, loader, criterion, device, use_amp):
         total_loss += loss.item() * imgs.size(0)
         correct += (outputs.argmax(1) == labels).sum().item()
         total += imgs.size(0)
+
+        batch_cur = i + 1
+        now = time.monotonic()
+        if progress_callback and (
+            batch_cur == total_batches or now - last_progress_at >= 1.0
+        ):
+            progress_callback(
+                "val",
+                batch_cur,
+                total_batches,
+                started_at,
+                total_loss / max(total, 1),
+                correct / max(total, 1),
+            )
+            last_progress_at = now
 
     return total_loss / total, correct / total
 
@@ -338,6 +492,7 @@ def train(args):
     # 클래스 맵 저장
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    best_model_path = save_dir / "best_model.pth"
     train_ds.save_class_map(save_dir / "class_map.json")
 
     # 모델
@@ -357,7 +512,7 @@ def train(args):
 
     # --finetune: best_model.pth를 로드해 Phase 2부터 추가학습
     if args.finetune:
-        best_pth = save_dir / "best_model.pth"
+        best_pth = best_model_path
         if not best_pth.exists():
             raise FileNotFoundError(f"--finetune 모드인데 {best_pth} 가 없습니다.")
         state = torch.load(best_pth, weights_only=True, map_location=device)
@@ -430,14 +585,26 @@ def train(args):
                 scaler,
                 use_amp,
                 accumulation_steps=args.accumulation_steps,
+                progress_callback=emit_progress_event,
             )
-            val_loss, val_acc = val_epoch(model, val_loader, criterion, device, use_amp)
+            val_loss, val_acc = val_epoch(
+                model, val_loader, criterion, device, use_amp, emit_progress_event
+            )
             scheduler.step()
 
             print(
                 f"  Epoch {epoch:2d}/{args.phase1_epochs} | "
                 f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f} | "
                 f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}"
+            )
+            emit_metric_event(
+                1,
+                epoch,
+                args.phase1_epochs,
+                train_loss,
+                train_acc,
+                val_loss,
+                val_acc,
             )
 
             if use_wandb:
@@ -453,10 +620,10 @@ def train(args):
                     }
                 )
 
-            if val_acc > best_val_acc:
+            if val_acc > best_val_acc or not best_model_path.exists():
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), save_dir / "best_model.pth")
+                torch.save(model.state_dict(), best_model_path)
                 print(f"  → best 저장 (val_acc: {val_acc:.4f})")
             else:
                 patience_counter += 1
@@ -548,14 +715,26 @@ def train(args):
             scaler,
             use_amp,
             accumulation_steps=args.accumulation_steps,
+            progress_callback=emit_progress_event,
         )
-        val_loss, val_acc = val_epoch(model, val_loader, criterion, device, use_amp)
+        val_loss, val_acc = val_epoch(
+            model, val_loader, criterion, device, use_amp, emit_progress_event
+        )
         scheduler.step()
 
         print(
             f"  Epoch {epoch:2d}/{args.phase2_epochs} | "
             f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f} | "
             f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}"
+        )
+        emit_metric_event(
+            2,
+            epoch,
+            args.phase2_epochs,
+            train_loss,
+            train_acc,
+            val_loss,
+            val_acc,
         )
 
         if use_wandb:
@@ -571,10 +750,10 @@ def train(args):
                 }
             )
 
-        if val_acc > best_val_acc:
+        if val_acc > best_val_acc or not best_model_path.exists():
             best_val_acc = val_acc
             patience_counter = 0
-            torch.save(model.state_dict(), save_dir / "best_model.pth")
+            torch.save(model.state_dict(), best_model_path)
             print(f"  → best 저장 (val_acc: {val_acc:.4f})")
         else:
             patience_counter += 1
@@ -613,7 +792,7 @@ def train(args):
     # ────────────────────────────────
     print(f"\n{'─' * 40}")
     print("테스트 세트 평가")
-    model.load_state_dict(torch.load(save_dir / "best_model.pth", weights_only=True))
+    model.load_state_dict(torch.load(best_model_path, weights_only=True))
     test_loss, test_acc, per_class_acc = test_epoch(
         model, test_loader, criterion, device, use_amp, num_classes
     )
@@ -692,4 +871,8 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    train(args)
+    try:
+        train(args)
+    except DeviceUnavailableError as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        sys.exit(2)

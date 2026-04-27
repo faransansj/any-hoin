@@ -5,24 +5,35 @@ import json
 import os
 import sys
 import tempfile
+import time
+
+from fastapi import WebSocket
 
 from .base_job import BaseJob
+
+CRAWL_EVENT_PREFIX = "__HOLOSCOPE_CRAWL_EVENT__ "
 
 
 class CrawlJob(BaseJob):
     def __init__(self):
         super().__init__("crawl")
         self._tmp_file: str | None = None
+        self.current_progress: dict | None = None
+        self.health: dict | None = None
+        self.last_event_at: float | None = None
 
     async def start(self, params: dict, project_root: str):
         if self.state == "running":
             return
         self.state = "running"
+        self.current_progress = None
+        self.health = None
+        self.last_event_at = None
 
         # 이전 임시 파일 정리
         self._cleanup_tmp()
 
-        cmd = [sys.executable, "crawling/danbooru_crawler.py"]
+        cmd = [sys.executable, "crawling/danbooru_crawler.py", "--events"]
 
         if params.get("username"):
             cmd += ["-u", params["username"]]
@@ -46,6 +57,63 @@ class CrawlJob(BaseJob):
             cmd += ["--tags-file", self._tmp_file]
 
         self._task = asyncio.create_task(self._run(cmd, cwd=project_root))
+
+    async def _on_line(self, line: str):
+        if CRAWL_EVENT_PREFIX not in line:
+            return
+        raw = line.split(CRAWL_EVENT_PREFIX, 1)[1].strip()
+        if not raw:
+            return
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            return
+
+        self.last_event_at = time.time()
+        event_type = event.get("event")
+        if event_type == "progress":
+            self.current_progress = event
+            self.health = event.get("health") or self.health
+            await self._broadcast({"type": "crawl_progress", "data": event})
+        elif event_type in {"start", "complete"}:
+            self.health = event.get("health") or self.health
+            await self._broadcast({"type": "crawl_health", "data": self.health_snapshot()})
+
+    async def _on_ws_connected(self, ws: WebSocket):
+        if self.current_progress is not None:
+            await ws.send_text(json.dumps({"type": "crawl_progress", "data": self.current_progress}))
+        if self.health is not None:
+            await ws.send_text(json.dumps({"type": "crawl_health", "data": self.health_snapshot()}))
+
+    def _format_log_line(self, line: str) -> str | None:
+        if CRAWL_EVENT_PREFIX not in line:
+            return line
+        visible = line.split(CRAWL_EVENT_PREFIX, 1)[0].strip()
+        return visible or None
+
+    def _last_event_age_sec(self) -> float | None:
+        if self.last_event_at is None:
+            return None
+        return round(time.time() - self.last_event_at, 1)
+
+    def health_snapshot(self) -> dict:
+        age = self._last_event_age_sec()
+        heartbeat_ok = self.state != "running" or (age is not None and age < 45)
+        return {
+            "state": self.state,
+            "heartbeat_ok": heartbeat_ok,
+            "last_event_age_sec": age,
+            "crawler": self.health,
+            "current_progress": self.current_progress,
+        }
+
+    def status(self) -> dict:
+        return {
+            **super().status(),
+            "current_progress": self.current_progress,
+            "health": self.health,
+            "last_event_age_sec": self._last_event_age_sec(),
+        }
 
     def _cleanup_tmp(self):
         if self._tmp_file and os.path.exists(self._tmp_file):

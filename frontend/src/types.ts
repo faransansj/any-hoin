@@ -2,7 +2,7 @@
 export type JobState = "idle" | "running" | "done" | "failed";
 
 export interface WsMessage {
-  type: "log" | "state" | "metric" | "progress";
+  type: "log" | "state" | "metric" | "progress" | "crawl_progress" | "crawl_health";
   data: unknown;
 }
 
@@ -14,6 +14,93 @@ export interface Character {
   count:        number;   // 현재 이미지 수
   other_count?: number;   // others/<key>에 격리된 이미지 수
   total_count?: number;   // count + other_count
+}
+
+export interface GenreCharacterCandidate {
+  key:          string;
+  tag:          string;
+  display_name: string;
+  post_count:   number;
+  source?:      string | null;
+}
+
+export interface GenreCharactersResponse {
+  query:      string;
+  normalized: string;
+  characters: GenreCharacterCandidate[];
+}
+
+export interface DatasetCharacterCandidate {
+  key:          string;
+  tag:          string;
+  display_name: string;
+  count:        number;
+}
+
+export interface DatasetDiscovery {
+  registered:     number;
+  dataset_labels: number;
+  missing:        DatasetCharacterCandidate[];
+}
+
+export interface CrawlRateHealth {
+  account_mode:     "anonymous" | "authenticated" | string;
+  api_requests:     number;
+  api_errors:       number;
+  download_errors:  number;
+  rate_limited:     boolean;
+  last_status:      number | null;
+  last_error:       string | null;
+  retry_after:      string | null;
+  last_api_at:      number | null;
+  last_latency_ms:  number | null;
+}
+
+export interface CrawlProgress {
+  current_character:   string;
+  current_index:       number;
+  total_characters:    number;
+  phase:               "starting" | "collecting" | "downloading" | "done" | string;
+  status?:             string | null;
+  char_downloaded:     number;
+  char_target:         number;
+  char_queue:          number;
+  char_pct:            number;
+  char_eta_sec:        number;
+  completed_characters:number;
+  included:            number;
+  skipped:             number;
+  below_threshold:     number;
+  total_downloaded:    number;
+  total_target:        number;
+  total_pct:           number;
+  overall_eta_sec:     number;
+  speed_img_s:         number;
+  health:              CrawlRateHealth;
+  updated_at:          number;
+}
+
+export interface CrawlStatus extends JobStatus {
+  current_progress:  CrawlProgress | null;
+  health:            CrawlRateHealth | null;
+  last_event_age_sec: number | null;
+}
+
+export interface CrawlHealthResponse {
+  state:               JobState;
+  heartbeat_ok:        boolean;
+  last_event_age_sec:  number | null;
+  crawler:             CrawlRateHealth | null;
+  current_progress:    CrawlProgress | null;
+  remote?: {
+    checked:      boolean;
+    ok:           boolean;
+    status_code:  number | null;
+    rate_limited: boolean;
+    retry_after:  string | null;
+    latency_ms:   number | null;
+    error:        string | null;
+  };
 }
 
 // ── 라벨 ────────────────────────────────────────────────
@@ -31,6 +118,8 @@ export interface ImageItem {
   url:       string;
   thumbnail: string;
 }
+
+export type ImageSort = "name_asc" | "name_desc" | "newest" | "oldest";
 
 // ── 학습 메트릭 ─────────────────────────────────────────
 export interface TrainMetric {
@@ -51,6 +140,32 @@ export interface TrainProgress {
   batch_total: number;
   eta_sec:     number;   // -1 = unknown
   speed_it_s:  number;   // batches/sec
+  avg_loss?:    number;   // current split running average
+  avg_acc?:     number;   // current split running average
+}
+
+export interface TrainingStatus extends JobStatus {
+  current_phase:    number;
+  best_val_acc:     number;
+  epoch_count:      number;
+  phase1_epochs:    number;
+  phase2_epochs:    number;
+  current_progress: TrainProgress | null;
+  last_metric:      TrainMetric | null;
+  elapsed_sec:      number | null;
+}
+
+export interface DeviceOption {
+  key:       string;
+  label:     string;
+  available: boolean;
+  reason:    string | null;
+}
+
+export interface TrainingDevicesResponse {
+  torch_version: string;
+  ipex_version:  string | null;
+  devices:       DeviceOption[];
 }
 
 // ── 잡 상태 ────────────────────────────────────────────
@@ -85,6 +200,21 @@ export interface ModelMap {
 export interface ModelsResponse {
   models: ModelMap;
   config_acc: number | null;
+}
+
+export interface InferenceModelInfo {
+  fp32_available:     boolean;
+  fp16_available:     boolean;
+  int8_available?:    boolean;
+  int4_available?:    boolean;
+  int2_available?:    boolean;
+  onnx_available:     boolean;
+  num_classes:        number | null;
+  best_val_acc:       number | null;
+  test_acc:           number | null;
+  preferred_backend?: string | null;
+  loaded_backend?:    string | null;
+  model_ready?:       boolean;
 }
 
 export interface QuantMetrics {

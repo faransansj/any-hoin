@@ -11,6 +11,10 @@ from crawling.danbooru_crawler import DanbooruCrawler
 from fastapi import HTTPException
 from studio.routers.images import _resolve_image_id, _resolve_label_dir
 from studio.routers.labels import _guard_name
+import studio.characters as characters_store
+import studio.routers.characters as characters_router
+import studio.routers.crawl as crawl_router
+from scripts.sync_backend import sync_command
 
 # ──────────────────────────────────────────────
 # Dataset Tests
@@ -127,6 +131,107 @@ def test_label_guard_rejects_unsafe_names():
     for name in ("..", ".hidden", "a/b", "a\\b", "a.b"):
         with pytest.raises(HTTPException):
             _guard_name(name)
+
+
+def test_character_discovery_recovers_existing_dataset(tmp_path, monkeypatch):
+    """세션 재시작 후 characters.json이 없어도 dataset/raw 폴더를 다시 등록."""
+    data_dir = tmp_path / "dataset" / "raw"
+    char_dir = data_dir / "hina_(blue_archive)"
+    char_dir.mkdir(parents=True)
+    Image.new("RGB", (100, 100), color="red").save(char_dir / "img.jpg")
+
+    chars_file = tmp_path / "characters.json"
+    monkeypatch.setattr(characters_store, "CHARACTERS_FILE", chars_file)
+    monkeypatch.setattr(characters_router, "DATASET_DIR", data_dir)
+
+    discovered = characters_router.discover_dataset_characters()
+    assert discovered["missing"][0]["key"] == "hina_(blue_archive)"
+
+    recovered = characters_router.recover_dataset_characters({"keys": ["hina_(blue_archive)"]})
+    assert recovered["imported"] == 1
+    assert characters_store.load()["hina_(blue_archive)"]["tag"] == "hina_(blue_archive)"
+
+
+def test_danbooru_tag_search_uses_autocomplete_alias(monkeypatch):
+    """실제 캐릭터 alias 입력도 autocomplete 결과로 Danbooru 태그를 찾는다."""
+    calls = []
+
+    def fake_get(url, params, **_kwargs):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        if url == crawl_router.DANBOORU_AUTOCOMPLETE_URL:
+            calls.append(("autocomplete", params["search[query]"]))
+            response.json.return_value = [{
+                "label": "hina (blue archive)",
+                "value": "hina_(blue_archive)",
+                "category": 4,
+                "post_count": 17740,
+                "antecedent": "sorasaki_hina",
+                "tag": {"is_deprecated": False, "post_count": 17740},
+            }]
+        else:
+            calls.append(("other", params))
+            response.json.return_value = []
+        return response
+
+    monkeypatch.setattr(crawl_router._req, "get", fake_get)
+
+    result = crawl_router.search_tags("Sorasaki Hina", limit=10)
+
+    assert calls[:2] == [("autocomplete", "Sorasaki Hina"), ("autocomplete", "sorasaki_hina")]
+    assert result["tags"][0]["name"] == "hina_(blue_archive)"
+    assert result["tags"][0]["antecedent"] == "sorasaki_hina"
+    assert result["tags"][0]["post_count"] == 17740
+
+
+def test_danbooru_tag_search_route_registered():
+    """FastAPI 라우터에 태그 검색 엔드포인트가 GET으로 등록되어야 함."""
+    assert any(
+        route.path == "/crawl/tags/search" and "GET" in route.methods
+        for route in crawl_router.router.routes
+    )
+
+
+def test_danbooru_tag_search_normalizes_and_falls_back(monkeypatch):
+    """공백 검색어를 Danbooru 태그 패턴으로 바꾸고 contains fallback까지 수행."""
+    tag_patterns = []
+
+    def fake_get(url, params, **_kwargs):
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        if url == crawl_router.DANBOORU_AUTOCOMPLETE_URL:
+            response.json.return_value = []
+        elif url == crawl_router.DANBOORU_TAGS_URL:
+            tag_patterns.append(params["search[name_matches]"])
+            response.json.return_value = (
+                [{
+                    "name": "hina_(blue_archive)",
+                    "post_count": 17740,
+                    "category": 4,
+                    "is_deprecated": False,
+                }]
+                if tag_patterns[-1] == "*hina*blue*archive*"
+                else []
+            )
+        else:
+            response.json.return_value = []
+        return response
+
+    monkeypatch.setattr(crawl_router._req, "get", fake_get)
+
+    result = crawl_router.search_tags("Hina Blue Archive", limit=10)
+
+    assert tag_patterns == ["hina_blue_archive*", "*hina_blue_archive*", "*hina*blue*archive*"]
+    assert result["tags"][0]["name"] == "hina_(blue_archive)"
+    assert result["tags"][0]["post_count"] == 17740
+
+
+def test_backend_sync_commands_are_unified_profiles():
+    assert sync_command("cpu") == ["uv", "sync"]
+    assert sync_command("mps") == ["uv", "sync"]
+    assert sync_command("cuda") == ["uv", "sync", "--extra", "cuda"]
+    assert sync_command("arc") == ["uv", "sync", "--extra", "arc"]
+    assert sync_command("rocm") == ["uv", "sync", "--extra", "rocm"]
 
 
 # ──────────────────────────────────────────────

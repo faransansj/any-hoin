@@ -10,6 +10,9 @@ import { api } from "../api";
 interface TagSuggestion {
   name: string;
   post_count: number;
+  label?: string | null;
+  antecedent?: string | null;
+  source?: string | null;
 }
 
 interface Props {
@@ -29,7 +32,10 @@ export default function TagSearchInput({
   const [loading,     setLoading]     = useState(false);
   const [open,        setOpen]        = useState(false);
   const [cursor,      setCursor]      = useState(-1);
+  const [error,       setError]       = useState("");
+  const [searched,    setSearched]    = useState(false);
   const timerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const requestRef = useRef(0);
   const wrapRef   = useRef<HTMLDivElement>(null);
   const listRef   = useRef<HTMLUListElement>(null);
 
@@ -56,20 +62,32 @@ export default function TagSearchInput({
     if (q.length < 2) {
       setSuggestions([]);
       setOpen(false);
+      setError("");
+      setSearched(false);
       onPostCount?.(null);
       return;
     }
     timerRef.current = setTimeout(async () => {
+      const requestId = ++requestRef.current;
       setLoading(true);
+      setError("");
       try {
-        const r = await api.get<{ tags: TagSuggestion[] }>(
+        const r = await api.get<{ tags: TagSuggestion[]; error?: string }>(
           `/crawl/tags/search?q=${encodeURIComponent(q)}&limit=10`
         );
+        if (requestId !== requestRef.current) return;
         setSuggestions(r.tags);
-        setOpen(r.tags.length > 0);
+        setSearched(true);
+        setOpen(true);
         setCursor(-1);
+      } catch (e: any) {
+        if (requestId !== requestRef.current) return;
+        setSuggestions([]);
+        setSearched(true);
+        setError(e?.message ?? "검색 실패");
+        setOpen(true);
       } finally {
-        setLoading(false);
+        if (requestId === requestRef.current) setLoading(false);
       }
     }, 350);
   }
@@ -84,6 +102,8 @@ export default function TagSearchInput({
     onPostCount?.(s.post_count);
     onSelect?.(s.name, s.post_count);
     setSuggestions([]);
+    setError("");
+    setSearched(false);
     setOpen(false);
     setCursor(-1);
   }
@@ -125,21 +145,38 @@ export default function TagSearchInput({
         )}
       </div>
 
-      {open && (
+      {open && (suggestions.length > 0 || error || searched) && (
         <ul
           ref={listRef}
-          className="absolute z-50 mt-0.5 w-full bg-gray-900 border border-gray-700 rounded-md shadow-xl max-h-52 overflow-y-auto text-xs"
+          className="absolute z-[100] mt-0.5 w-full min-w-72 bg-gray-900 border border-gray-700 rounded-md shadow-xl max-h-64 overflow-y-auto text-xs"
         >
+          {error && (
+            <li className="px-3 py-2 text-red-300 bg-red-950/40">
+              Danbooru 태그 검색 실패: {error}
+            </li>
+          )}
+          {!error && searched && suggestions.length === 0 && (
+            <li className="px-3 py-2 text-gray-500">
+              검색 결과 없음
+            </li>
+          )}
           {suggestions.map((s, i) => (
             <li
               key={s.name}
               onMouseDown={() => select(s)}
               onMouseEnter={() => setCursor(i)}
-              className={`flex items-center justify-between px-3 py-1.5 cursor-pointer transition-colors ${
+              className={`flex items-center justify-between gap-3 px-3 py-1.5 cursor-pointer transition-colors ${
                 i === cursor ? "bg-brand-600/40 text-white" : "hover:bg-gray-800 text-gray-300"
               }`}
             >
-              <span className="font-mono truncate">{s.name}</span>
+              <span className="min-w-0">
+                <span className="block font-mono truncate">{s.name}</span>
+                {(s.antecedent || (s.label && s.label !== s.name)) && (
+                  <span className="block truncate text-[10px] text-gray-500">
+                    {s.antecedent ? `alias: ${s.antecedent}` : s.label}
+                  </span>
+                )}
+              </span>
               <span className="ml-3 shrink-0 text-gray-500">
                 {s.post_count.toLocaleString()}장
               </span>

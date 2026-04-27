@@ -30,6 +30,37 @@ def _with_count(char: dict) -> dict:
     }
 
 
+def _guard_key(key: str) -> str:
+    key = key.strip()
+    if not key:
+        raise HTTPException(400, "key is required")
+    if any(c in key for c in "/\\."):
+        raise HTTPException(400, "key must not contain path separators")
+    return key
+
+
+def _dataset_candidates(include_others: bool = False) -> list[dict]:
+    if not DATASET_DIR.exists():
+        return []
+
+    candidates = []
+    for d in sorted(DATASET_DIR.iterdir()):
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        if d.name == "others" and not include_others:
+            continue
+        count = _count_images(d, recursive=True)
+        if count <= 0:
+            continue
+        candidates.append({
+            "key": d.name,
+            "tag": d.name,
+            "display_name": d.name,
+            "count": count,
+        })
+    return candidates
+
+
 # ── 목록 ──────────────────────────────────────────────────
 
 @router.get("")
@@ -42,17 +73,12 @@ def list_characters():
 
 @router.post("")
 def create_character(body: dict):
-    key          = (body.get("key") or "").strip()
+    key          = _guard_key(body.get("key") or "")
     tag          = (body.get("tag") or "").strip()
     display_name = (body.get("display_name") or key).strip()
 
-    if not key:
-        raise HTTPException(400, "key is required")
     if not tag:
         raise HTTPException(400, "tag is required")
-    # key는 폴더명이므로 경로 구분자 금지
-    if any(c in key for c in "/\\."):
-        raise HTTPException(400, "key must not contain path separators")
 
     chars = ch.load()
     if key in chars:
@@ -97,22 +123,75 @@ def delete_character(key: str):
 def import_characters(body: dict):
     """
     body = {"characters": [{"key": ..., "tag": ..., "display_name": ...}]}
-    기존 key는 덮어쓰기.
+    overwrite=false이면 기존 key는 건너뜀.
     """
     chars   = ch.load()
     imported = []
     skipped  = []
+    overwrite = bool(body.get("overwrite", True))
 
     for item in body.get("characters", []):
-        key = (item.get("key") or "").strip()
+        try:
+            key = _guard_key(item.get("key") or "")
+        except HTTPException:
+            skipped.append(item)
+            continue
         tag = (item.get("tag") or "").strip()
         if not key or not tag:
             skipped.append(item)
+            continue
+        if key in chars and not overwrite:
+            skipped.append(key)
             continue
         chars[key] = {
             "key":          key,
             "tag":          tag,
             "display_name": (item.get("display_name") or key).strip(),
+        }
+        imported.append(key)
+
+    ch.save(chars)
+    return {"imported": len(imported), "skipped": len(skipped), "keys": imported}
+
+
+@router.get("/discover")
+def discover_dataset_characters(include_others: bool = False):
+    """dataset/raw에 이미지가 있지만 characters.json에 없는 폴더를 감지."""
+    chars = ch.load()
+    dataset_items = _dataset_candidates(include_others=include_others)
+    missing = [item for item in dataset_items if item["key"] not in chars]
+    return {
+        "registered": len(chars),
+        "dataset_labels": len(dataset_items),
+        "missing": missing,
+    }
+
+
+@router.post("/recover")
+def recover_dataset_characters(body: dict):
+    """
+    dataset/raw/<key> 폴더를 characters.json에 다시 등록한다.
+    기본 tag/display_name은 폴더명으로 복구한다.
+    """
+    include_others = bool(body.get("include_others", False))
+    requested = body.get("keys")
+    requested_keys = {str(k).strip() for k in requested} if isinstance(requested, list) else None
+
+    chars = ch.load()
+    imported = []
+    skipped = []
+
+    for item in _dataset_candidates(include_others=include_others):
+        key = _guard_key(item["key"])
+        if requested_keys is not None and key not in requested_keys:
+            continue
+        if key in chars:
+            skipped.append(key)
+            continue
+        chars[key] = {
+            "key": key,
+            "tag": item["tag"],
+            "display_name": item["display_name"],
         }
         imported.append(key)
 

@@ -65,9 +65,9 @@ sudo apt install -y level-zero-dev && \
 
 ---
 
-## 2단계: IPEX (Intel Extension for PyTorch) 설치
+## 2단계: XPU PyTorch / IPEX 설치
 
-IPEX는 Intel Arc XPU 백엔드를 PyTorch에 추가합니다.
+Intel Arc 학습에는 `+xpu` PyTorch 빌드가 필요합니다. CUDA 빌드(`+cu...`)가 설치된 환경에서는 `torch.xpu` 네임스페이스가 보여도 실제 XPU 연산은 불가능합니다.
 
 ```bash
 # 프로젝트 루트로 이동
@@ -76,8 +76,14 @@ cd /path/to/anihoin
 # uv로 arc 의존성 설치
 uv sync --extra arc
 
+또는 통합 backend 선택 도구를 사용할 수 있습니다.
+
+```bash
+python scripts/sync_backend.py arc --apply --check
+```
+
 # 설치 확인
-uv run python -c "
+uv run --extra arc python -c "
 import torch
 import intel_extension_for_pytorch as ipex
 print(f'PyTorch: {torch.__version__}')
@@ -134,7 +140,7 @@ source ~/.bashrc
 
 ```bash
 # Intel Arc XPU 가속 학습
-uv run python train.py \
+uv run --extra arc python train.py \
   --xpu \
   --data-dir  ./dataset/raw \
   --save-dir  ./checkpoints \
@@ -143,12 +149,14 @@ uv run python train.py \
   --phase2-epochs 30
 
 # 특정 XPU 장치 지정 (멀티 GPU)
-uv run python train.py \
+uv run --extra arc python train.py \
   --device xpu:1 \
   --batch-size 32 \
   --phase1-epochs 5 \
   --phase2-epochs 30
 ```
+
+> 주의: `uv run python ...`처럼 `--extra arc` 없이 실행하면 uv가 기본 환경으로 다시 sync하면서 CUDA/PyPI torch가 재설치될 수 있습니다. Arc 환경에서는 `uv run --extra arc ...`를 사용하거나, `uv sync --extra arc` 직후 `.venv/bin/python ...`을 직접 실행하세요.
 
 ### 파이프라인 실행
 
@@ -185,7 +193,7 @@ sudo apt install -y intel-gpu-tools
 sudo intel_gpu_top
 
 # 또는 Python으로 XPU 메모리 확인
-uv run python -c "
+uv run --extra arc python -c "
 import torch
 import intel_extension_for_pytorch as ipex
 t = torch.randn(1000, 1000).to('xpu')
@@ -214,12 +222,27 @@ ls /dev/dri/render*  # 없으면 드라이버 재설치
 
 ### ❌ `RuntimeError: XPU 사용 불가` during `--xpu`
 
+### ❌ `AssertionError: Torch not compiled with XPU enabled`
+
+현재 환경에 CUDA 빌드 PyTorch가 설치된 상태에서 `--device xpu` 또는 Studio의 XPU 옵션을 강제로 선택한 경우입니다.
+
+```bash
+uv run --extra arc python -c "import torch; print(torch.__version__)"
+# 2.x.x+cu... 이면 XPU 빌드가 아닙니다.
+
+uv sync --extra arc
+uv run --extra arc python -c "import torch; print(torch.__version__, torch.xpu.is_available())"
+# 2.x.x+xpu True 여야 합니다.
+```
+
+CUDA/NVIDIA 환경이라면 XPU가 아니라 `auto` 또는 `CUDA`를 선택하세요.
+
 ```bash
 # 방법 1: XPU 강제 플래그 제거 후 자동 감지
-uv run python train.py  # --xpu 없이 실행, 자동으로 xpu → cuda → cpu 시도
+uv run --extra arc python train.py  # --xpu 없이 실행, 자동으로 xpu → cuda → cpu 시도
 
 # 방법 2: CPU 폴백
-uv run python train.py --cpu
+uv run --extra arc python train.py --cpu
 ```
 
 ### ❌ BFloat16 / FP16 오류
@@ -229,10 +252,10 @@ IPEX optimize()는 기본적으로 `dtype=torch.bfloat16`을 사용하므로 별
 
 ```bash
 # bf16으로 강제 실행 (AMP 활성화)
-uv run python train.py --xpu
+uv run --extra arc python train.py --xpu
 
 # AMP 비활성화 (FP32, 느림)
-uv run python train.py --xpu --no-amp
+uv run --extra arc python train.py --xpu --no-amp
 ```
 
 ### ❌ WSL2 환경에서 XPU 미감지

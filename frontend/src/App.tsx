@@ -4,6 +4,7 @@ import Dataset   from "./pages/Dataset";
 import Training  from "./pages/Training";
 import Export    from "./pages/Export";
 import Inference from "./pages/Inference";
+import TrainingMonitor from "./components/TrainingMonitor";
 import { useJobStore } from "./store/jobStore";
 import { useTranslation } from "react-i18next";
 import { useState, useEffect } from "react";
@@ -43,6 +44,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 transition-colors duration-200">
+      <TrainingMonitor />
       {/* ── 사이드바 ─────────────────────────────── */}
       <aside className="w-48 bg-gray-50 dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 flex flex-col shrink-0">
         <div className="px-4 py-5 border-b border-gray-200 dark:border-gray-800">

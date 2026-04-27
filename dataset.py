@@ -6,15 +6,23 @@ Dataset & Augmentation Pipeline for Hololive Classifier
 
 import os
 import json
+import warnings
 from pathlib import Path
 from PIL import Image
 
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-import torchvision.transforms as T
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import numpy as np
+
+os.environ.setdefault("NO_ALBUMENTATIONS_UPDATE", "1")
+
+# Danbooru 이미지 중 일부는 EXIF/TIFF 메타데이터가 깨져 있다. 이미지 본문은
+# 정상 학습 가능하므로 PIL의 반복 경고만 숨겨 웹 로그가 오염되지 않게 한다.
+warnings.filterwarnings("ignore", message=r".*Corrupt EXIF data.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Possibly corrupt EXIF data.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=r".*Truncated File Read.*", category=UserWarning)
 
 
 # ──────────────────────────────────────────────

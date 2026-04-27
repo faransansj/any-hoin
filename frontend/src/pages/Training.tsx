@@ -11,7 +11,7 @@ import JobConsole from "../components/JobConsole";
 import MetricsChart from "../components/MetricsChart";
 import StatusBadge from "../components/StatusBadge";
 import { useJobStore } from "../store/jobStore";
-import type { JobState, TrainMetric, TrainProgress } from "../types";
+import type { DeviceOption, TrainMetric, TrainProgress, TrainingDevicesResponse, TrainingStatus } from "../types";
 
 // ── 헬퍼 ────────────────────────────────────────────────
 
@@ -42,13 +42,38 @@ function ProgressBar({ pct, color = "bg-brand-500", thin }: ProgressBarProps) {
   );
 }
 
+type NotificationStatus = NotificationPermission | "unsupported";
+
+function currentNotificationPermission(): NotificationStatus {
+  return "Notification" in window ? Notification.permission : "unsupported";
+}
+
+async function requestTrainingNotifications(): Promise<NotificationStatus> {
+  if (!("Notification" in window)) return "unsupported";
+  if (Notification.permission !== "default") return Notification.permission;
+  try {
+    return await Notification.requestPermission();
+  } catch {
+    /* 알림 권한은 학습 시작을 막지 않는다. */
+    return Notification.permission;
+  }
+}
+
 // ── 컴포넌트 ─────────────────────────────────────────────
+
+const DEFAULT_DEVICE_OPTIONS: DeviceOption[] = [
+  { key: "auto", label: "auto", available: true, reason: null },
+  { key: "cuda", label: "CUDA", available: true, reason: null },
+  { key: "mps", label: "MPS (Apple)", available: true, reason: null },
+  { key: "xpu", label: "XPU (Intel Arc)", available: true, reason: null },
+  { key: "cpu", label: "CPU", available: true, reason: null },
+];
 
 export default function Training() {
   const { t } = useTranslation();
   const {
     trainState, setTrainState,
-    trainMetrics, bestValAcc, pushMetric, resetMetrics,
+    trainMetrics, bestValAcc, pushMetric, setMetrics, resetMetrics,
     trainProgress, setTrainProgress,
   } = useJobStore();
 
@@ -58,21 +83,41 @@ export default function Training() {
   const [phase2Lr,      setPhase2Lr]      = useState("1e-5");
   const [patience,      setPatience]      = useState(7);
   const [device,        setDevice]        = useState("auto");
+  const [deviceOptions, setDeviceOptions] = useState<DeviceOption[]>(DEFAULT_DEVICE_OPTIONS);
   const [finetune,      setFinetune]      = useState(false);
   const [noAmp,         setNoAmp]         = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState<NotificationStatus>(
+    () => currentNotificationPermission()
+  );
 
   useEffect(() => {
-    api.get<{ state: JobState; epoch_count: number; best_val_acc: number }>("/training/status")
-      .then((r) => setTrainState(r.state))
+    api.get<TrainingStatus>("/training/status")
+      .then((r) => {
+        setTrainState(r.state);
+        setTrainProgress(r.state === "running" ? r.current_progress : null);
+        setPhase1Epochs(r.phase1_epochs);
+        setPhase2Epochs(r.phase2_epochs);
+      })
       .catch(console.error);
 
     api.get<{ metrics: TrainMetric[] }>("/training/metrics")
-      .then((r) => r.metrics.forEach(pushMetric))
+      .then((r) => setMetrics(r.metrics))
       .catch(console.error);
-  }, []);
+
+    api.get<TrainingDevicesResponse>("/training/devices")
+      .then((r) => {
+        setDeviceOptions(r.devices);
+        setDevice((prev) => {
+          const selected = r.devices.find((item) => item.key === prev);
+          return selected?.available ? prev : "auto";
+        });
+      })
+      .catch(console.error);
+  }, [setMetrics, setTrainProgress, setTrainState]);
 
   async function startTraining() {
     resetMetrics();
+    setNotificationPermission(await requestTrainingNotifications());
     await api.post("/training/start", {
       batch_size:    batchSize,
       phase1_epochs: phase1Epochs,
@@ -83,14 +128,20 @@ export default function Training() {
       finetune,
       no_amp: noAmp,
     });
+    setTrainState("running");
   }
 
   async function stopTraining() {
     await api.post("/training/stop");
   }
 
+  async function enableNotifications() {
+    setNotificationPermission(await requestTrainingNotifications());
+  }
+
   const running = trainState === "running";
   const latestMetric = trainMetrics.at(-1);
+  const xpuOption = deviceOptions.find((item) => item.key === "xpu");
 
   // ── 진행률 계산 ────────────────────────────────────────
 
@@ -125,13 +176,17 @@ export default function Training() {
              <label className="label-text">{t("training.device")}</label>
              <select value={device} onChange={(e) => setDevice(e.target.value)}
                className="input" disabled={running}>
-
-              <option value="auto">auto</option>
-              <option value="cuda">CUDA</option>
-              <option value="mps">MPS (Apple)</option>
-              <option value="xpu">XPU (Intel Arc)</option>
-              <option value="cpu">CPU</option>
+              {deviceOptions.map((option) => (
+                <option key={option.key} value={option.key} disabled={!option.available}>
+                  {option.label}{option.available ? "" : " (unavailable)"}
+                </option>
+              ))}
             </select>
+            {xpuOption && !xpuOption.available && (
+              <p className="mt-1 text-[11px] leading-4 text-amber-400">
+                {xpuOption.reason}
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-2">
@@ -189,6 +244,25 @@ export default function Training() {
                <button onClick={startTraining} className="btn-primary w-full">{t("training.start_btn")}</button>
              ) : (
                <button onClick={stopTraining} className="btn-danger w-full">{t("training.stop_btn")}</button>
+             )}
+           </div>
+
+           <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3 space-y-2">
+             <div className="flex items-center justify-between gap-2">
+               <p className="text-xs font-medium text-gray-300">{t("training.monitoring_title")}</p>
+               <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-800 text-gray-400">
+                 {t(`training.notification_${notificationPermission}`)}
+               </span>
+             </div>
+             <p className="text-[11px] leading-4 text-gray-500">{t("training.monitoring_hint")}</p>
+             {notificationPermission === "default" && (
+               <button
+                 type="button"
+                 onClick={enableNotifications}
+                 className="text-[11px] text-brand-300 hover:text-brand-200"
+               >
+                 {t("training.enable_notifications")}
+               </button>
              )}
            </div>
 
@@ -279,7 +353,12 @@ export default function Training() {
 
           {/* 차트 */}
           <div className="card">
-            <MetricsChart metrics={trainMetrics} phase1Epochs={phase1Epochs} />
+            <MetricsChart
+              metrics={trainMetrics}
+              phase1Epochs={phase1Epochs}
+              progress={trainProgress}
+              running={running}
+            />
           </div>
         </div>
       </div>

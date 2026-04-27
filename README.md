@@ -68,7 +68,10 @@ cd any-hoin
 # 3. Install Python dependencies (CPU / inference only)
 uv sync
 
-# 3a. (Optional) Pick ONE GPU backend — they are mutually exclusive
+# 3a. (Optional) Unified backend setup
+python scripts/sync_backend.py auto --apply --check
+
+# Or explicitly pick ONE GPU backend — PyTorch accelerator wheels are mutually exclusive
 uv sync --extra cuda   # NVIDIA GPU
 uv sync --extra rocm   # AMD GPU  (Linux only)
 uv sync --extra arc    # Intel Arc XPU (Linux only)
@@ -82,6 +85,8 @@ uv sync --extra arc    # Intel Arc XPU (Linux only)
 - Frontend UI → `http://localhost:5173`
 
 Press `Ctrl+C` to stop both at once.
+
+> **Unified device workflow**: In Studio, leave Training device as `auto`. Install/sync the backend once with `scripts/sync_backend.py`, then start with `./start.sh`. Avoid plain `uv run python` after selecting Arc/ROCm/CUDA because uv may re-sync the environment back to the default torch profile.
 
 ---
 

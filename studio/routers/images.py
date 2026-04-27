@@ -25,6 +25,16 @@ def _image_files(d: Path) -> list[Path]:
     )
 
 
+def _sort_images(files: list[Path], mode: str) -> list[Path]:
+    if mode == "name_desc":
+        return sorted(files, key=lambda p: p.as_posix().lower(), reverse=True)
+    if mode == "newest":
+        return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
+    if mode == "oldest":
+        return sorted(files, key=lambda p: p.stat().st_mtime)
+    return sorted(files, key=lambda p: p.as_posix().lower())
+
+
 # ── 목록 조회 ──────────────────────────────────────────────
 
 @router.get("")
@@ -32,9 +42,10 @@ def list_images(
     label: str = Query(...),
     page: int = Query(1, ge=1),
     per_page: int = Query(60, ge=1, le=200),
+    sort: str = Query("name_asc", pattern="^(name_asc|name_desc|newest|oldest)$"),
 ):
     label_dir = _resolve_label_dir(label)
-    files = _image_files(label_dir)
+    files = _sort_images(_image_files(label_dir), sort)
     total = len(files)
     start = (page - 1) * per_page
     page_files = files[start : start + per_page]
