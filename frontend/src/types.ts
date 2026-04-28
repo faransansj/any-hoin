@@ -121,6 +121,72 @@ export interface ImageItem {
 
 export type ImageSort = "name_asc" | "name_desc" | "newest" | "oldest";
 
+export interface LargeImageItem {
+  id:      string;
+  label:   string;
+  name:    string;
+  bytes:   number;
+  size_mb: number;
+  width:   number | null;
+  height:  number | null;
+}
+
+export interface LargeImageScan {
+  label:           string | null;
+  threshold_mb:    number;
+  threshold_bytes: number;
+  total_count:     number;
+  large_count:     number;
+  large_bytes:     number;
+  largest:         LargeImageItem[];
+}
+
+export interface ImagePreprocessItem extends LargeImageItem {
+  processed:    boolean;
+  before_bytes: number;
+  after_bytes:  number;
+  saved_bytes:  number;
+  reason:       string;
+}
+
+export interface ImagePreprocessResult {
+  label:        string | null;
+  threshold_mb: number;
+  max_side:     number;
+  quality:      number;
+  scanned:      number;
+  processed:    number;
+  skipped:      number;
+  before_bytes: number;
+  after_bytes:  number;
+  saved_bytes:  number;
+  items:        ImagePreprocessItem[];
+}
+
+export interface ImagePreprocessStatus {
+  name:          string;
+  state:         JobState;
+  label:         string | null;
+  threshold_mb:  number;
+  max_side:      number;
+  quality:       number;
+  dry_run:       boolean;
+  total:         number;
+  current:       number;
+  pct:           number;
+  current_image: string | null;
+  processed:     number;
+  skipped:       number;
+  before_bytes:  number;
+  after_bytes:   number;
+  saved_bytes:   number;
+  started_at:    number | null;
+  finished_at:   number | null;
+  elapsed_sec:   number | null;
+  error:         string | null;
+  result:        ImagePreprocessResult | null;
+}
+
 // ── 학습 메트릭 ─────────────────────────────────────────
 export interface TrainMetric {
   epoch:        number;

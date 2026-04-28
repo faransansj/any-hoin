@@ -479,6 +479,7 @@ def train(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device_type=device.type,
+        deep_validate_images=getattr(args, "deep_validate_images", False),
     )
 
     num_classes = len(train_ds.classes)
@@ -863,6 +864,11 @@ if __name__ == "__main__":
     parser.add_argument("--wandb", action="store_true", help="WandB 로깅 활성화")
     parser.add_argument("--wandb-project", default="holoscope")
     parser.add_argument("--wandb-run", default=None, help="WandB 실행 이름 (미지정 시 자동)")
+    parser.add_argument(
+        "--deep-validate-images",
+        action="store_true",
+        help="학습 전 모든 이미지 헤더를 PIL로 검사합니다. 대형 데이터셋에서는 느릴 수 있습니다.",
+    )
     parser.add_argument(
         "--accumulation-steps",
         type=int,

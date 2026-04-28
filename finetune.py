@@ -8,6 +8,7 @@
 
 import json
 import argparse
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -16,11 +17,16 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from PIL import Image
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 import timm
 from tqdm import tqdm
+from dataset import (
+    IMAGE_LOAD_ERRORS,
+    load_rgb_image_array,
+    report_integrity_skips,
+    validate_image_file,
+)
 
 
 # ──────────────────────────────────────────────
@@ -84,11 +90,18 @@ class PartialFinetuneDataset(Dataset):
         ])
 
         all_samples = []
+        skipped_files = []
         for cls in available:
             cls_dir = data_dir / cls
             for f in cls_dir.iterdir():
-                if f.suffix.lower() in VALID_EXT:
-                    all_samples.append((str(f), self.name_to_idx[cls]))
+                if f.suffix.lower() not in VALID_EXT:
+                    continue
+                valid, reason = validate_image_file(f)
+                if not valid:
+                    skipped_files.append((str(f), reason))
+                    continue
+                all_samples.append((str(f), self.name_to_idx[cls]))
+        report_integrity_skips(skipped_files)
 
         rng = np.random.default_rng(seed)
         indices = rng.permutation(len(all_samples))
@@ -105,18 +118,26 @@ class PartialFinetuneDataset(Dataset):
 
         self.samples = [all_samples[i] for i in split_indices]
         self.active_classes = available
+        self.skipped_files = skipped_files
         print(f"[{split}] {len(self.samples)}장 | {len(available)}개 클래스")
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path, label = self.samples[idx]
-        try:
-            img = np.array(Image.open(img_path).convert("RGB"))
-        except Exception:
-            # 손상된 이미지 → 검은 이미지로 대체
-            img = np.zeros((224, 224, 3), dtype=np.uint8)
+        for offset in range(len(self.samples)):
+            img_path, label = self.samples[(idx + offset) % len(self.samples)]
+            try:
+                img = load_rgb_image_array(img_path)
+                break
+            except IMAGE_LOAD_ERRORS as exc:
+                warnings.warn(
+                    f"Skipping unreadable image at load time: {img_path} "
+                    f"({exc.__class__.__name__})",
+                    RuntimeWarning,
+                )
+        else:
+            raise RuntimeError("No readable images left in dataset split.")
         if self.transform:
             img = self.transform(image=img)["image"]
         return img, label

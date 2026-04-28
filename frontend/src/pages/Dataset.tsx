@@ -3,15 +3,37 @@
  * - 좌측: 라벨 목록 (CRUD)
  * - 우측: 이미지 그리드 (선택 → 이동/삭제 / 업로드)
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { api } from "../api";
 import { useTranslation } from "react-i18next";
 import ImageModal from "../components/ImageModal";
 import { useJobStore } from "../store/jobStore";
-import type { DatasetDiscovery, ImageItem, ImageSort, JobState, Label } from "../types";
+import type {
+  DatasetDiscovery,
+  ImageItem,
+  ImagePreprocessResult,
+  ImagePreprocessStatus,
+  ImageSort,
+  JobState,
+  Label,
+  LargeImageScan,
+} from "../types";
 
 const PER_PAGE = 60;
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDuration(sec: number | null): string {
+  if (sec == null) return "-";
+  if (sec < 60) return `${sec.toFixed(1)}초`;
+  const minutes = Math.floor(sec / 60);
+  const seconds = Math.round(sec % 60);
+  return `${minutes}분 ${seconds}초`;
+}
 
 export default function Dataset() {
   const { t } = useTranslation();
@@ -33,6 +55,18 @@ export default function Dataset() {
   const [lowOnly,      setLowOnly]      = useState(false);
   const [imageSort,    setImageSort]    = useState<ImageSort>("name_asc");
   const [lastSelectedIndex, setLastSelectedIndex] = useState<number | null>(null);
+  const [preprocessScope, setPreprocessScope] = useState<"all" | "active">("all");
+  const [thresholdMb, setThresholdMb] = useState(16);
+  const [maxSide, setMaxSide] = useState(2048);
+  const [quality, setQuality] = useState(88);
+  const [largeScan, setLargeScan] = useState<LargeImageScan | null>(null);
+  const [preprocessResult, setPreprocessResult] = useState<ImagePreprocessResult | null>(null);
+  const [preprocessStatus, setPreprocessStatus] = useState<ImagePreprocessStatus | null>(null);
+  const [scanningLarge, setScanningLarge] = useState(false);
+  const [preprocessing, setPreprocessing] = useState(false);
+  const lastPreprocessFinishedAt = useRef<number | null>(null);
+  const preprocessLabel = preprocessScope === "active" ? activeLabel : null;
+  const preprocessRunning = preprocessStatus?.state === "running";
 
   // ── 라벨 목록 ──────────────────────────────────────────
   const loadLabels = useCallback(async () => {
@@ -47,6 +81,31 @@ export default function Dataset() {
   const loadDatasetDiscovery = useCallback(async () => {
     const r = await api.get<DatasetDiscovery>("/characters/discover");
     setDiscovery(r);
+  }, []);
+
+  const scanLargeImages = useCallback(async () => {
+    if (preprocessScope === "active" && !preprocessLabel) {
+      setLargeScan(null);
+      return;
+    }
+    setScanningLarge(true);
+    try {
+      const params = new URLSearchParams({
+        threshold_mb: String(thresholdMb),
+        preview_limit: "12",
+      });
+      if (preprocessLabel) params.set("label", preprocessLabel);
+      const r = await api.get<LargeImageScan>(`/images/preprocess/scan?${params}`);
+      setLargeScan(r);
+    } finally {
+      setScanningLarge(false);
+    }
+  }, [preprocessLabel, preprocessScope, thresholdMb]);
+
+  const loadPreprocessStatus = useCallback(async () => {
+    const r = await api.get<ImagePreprocessStatus>("/images/preprocess/status");
+    setPreprocessStatus(r);
+    return r;
   }, []);
 
   // ── 이미지 목록 ────────────────────────────────────────
@@ -70,6 +129,11 @@ export default function Dataset() {
     void loadLabels();
     void loadDatasetDiscovery();
   }, [loadDatasetDiscovery, loadLabels]);
+
+  useEffect(() => {
+    void scanLargeImages();
+  }, [scanLargeImages]);
+
   useEffect(() => {
     if (activeLabel) {
       void loadImages(activeLabel, 1);
@@ -80,6 +144,35 @@ export default function Dataset() {
     setPage(1);
     setSelected(new Set());
   }, [activeLabel, loadImages]);
+
+  useEffect(() => {
+    void loadPreprocessStatus();
+  }, [loadPreprocessStatus]);
+
+  useEffect(() => {
+    if (preprocessStatus?.state !== "running") return;
+    const timer = setInterval(() => {
+      void loadPreprocessStatus().catch(console.error);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [loadPreprocessStatus, preprocessStatus?.state]);
+
+  useEffect(() => {
+    if (!preprocessStatus?.finished_at) return;
+    if (lastPreprocessFinishedAt.current === preprocessStatus.finished_at) return;
+
+    lastPreprocessFinishedAt.current = preprocessStatus.finished_at;
+    if (preprocessStatus.result) setPreprocessResult(preprocessStatus.result);
+    if (preprocessStatus.state !== "done") return;
+
+    async function refreshAfterPreprocess() {
+      await scanLargeImages();
+      await loadLabels();
+      if (activeLabel) await loadImages(activeLabel, page);
+    }
+
+    void refreshAfterPreprocess().catch(console.error);
+  }, [activeLabel, loadImages, loadLabels, page, preprocessStatus, scanLargeImages]);
 
   useEffect(() => {
     api.get<{ state: JobState }>("/crawl/status")
@@ -214,6 +307,26 @@ export default function Dataset() {
     await api.delete("/images", { image_ids: Array.from(selected) });
     await loadLabels();
     await loadImages(activeLabel!, page);
+  }
+
+  async function runPreprocess() {
+    if (preprocessScope === "active" && !preprocessLabel) return;
+    const target = preprocessLabel ? `"${preprocessLabel}" 라벨` : "전체 데이터셋";
+    if (!confirm(`${target}의 ${thresholdMb}MB 이상 이미지를 최대 ${maxSide}px로 줄입니다. 원본 파일이 교체됩니다. 계속할까요?`)) return;
+
+    setPreprocessing(true);
+    try {
+      setPreprocessResult(null);
+      const r = await api.post<ImagePreprocessStatus>("/images/preprocess/start", {
+        label: preprocessLabel,
+        threshold_mb: thresholdMb,
+        max_side: maxSide,
+        quality,
+      });
+      setPreprocessStatus(r);
+    } finally {
+      setPreprocessing(false);
+    }
   }
 
   const totalPages = Math.ceil(totalImages / PER_PAGE);
@@ -373,6 +486,153 @@ export default function Dataset() {
                 </button>
               </div>
             )}
+
+            <div className="mx-4 mt-3 border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 shrink-0">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">이미지 전처리</p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    용량이 큰 이미지를 감지하면 학습 전 긴 변 해상도를 낮춰 디코딩 병목을 줄이는 것을 권장합니다.
+                  </p>
+                </div>
+                {largeScan && largeScan.large_count > 0 && (
+                  <div className="text-right text-xs text-amber-300">
+                    <p className="font-semibold">대용량 이미지 {largeScan.large_count.toLocaleString()}장 감지</p>
+                    <p>{formatBytes(largeScan.large_bytes)} 전처리 권장</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 lg:grid-cols-5 gap-2 items-end">
+                <label className="space-y-1">
+                  <span className="label-text">범위</span>
+                  <select
+                    value={preprocessScope}
+                    onChange={(e) => setPreprocessScope(e.target.value as "all" | "active")}
+                    className="input text-xs py-1"
+                  >
+                    <option value="all">전체 데이터셋</option>
+                    <option value="active">현재 라벨</option>
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="label-text">탐지 기준(MB)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={512}
+                    value={thresholdMb}
+                    onChange={(e) => setThresholdMb(Number(e.target.value))}
+                    className="input text-xs py-1"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="label-text">최대 긴 변(px)</span>
+                  <input
+                    type="number"
+                    min={512}
+                    max={8192}
+                    step={128}
+                    value={maxSide}
+                    onChange={(e) => setMaxSide(Number(e.target.value))}
+                    className="input text-xs py-1"
+                  />
+                </label>
+                <label className="space-y-1">
+                  <span className="label-text">JPEG/WebP 품질</span>
+                  <input
+                    type="number"
+                    min={50}
+                    max={100}
+                    value={quality}
+                    onChange={(e) => setQuality(Number(e.target.value))}
+                    className="input text-xs py-1"
+                  />
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={scanLargeImages}
+                    disabled={scanningLarge || preprocessRunning || (preprocessScope === "active" && !activeLabel)}
+                    className="btn-ghost text-xs py-1 flex-1"
+                  >
+                    {scanningLarge ? "스캔 중" : "스캔"}
+                  </button>
+                  <button
+                    onClick={runPreprocess}
+                    disabled={preprocessing || preprocessRunning || !largeScan || largeScan.large_count === 0 || (preprocessScope === "active" && !activeLabel)}
+                    className="btn-primary text-xs py-1 flex-1 disabled:opacity-50"
+                  >
+                    {preprocessRunning ? `${preprocessStatus?.pct ?? 0}%` : preprocessing ? "시작 중" : "전처리"}
+                  </button>
+                </div>
+              </div>
+
+              {preprocessStatus && preprocessStatus.state !== "idle" && (
+                <div className="mt-3 rounded border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950/60 p-3">
+                  <div className="flex items-center justify-between gap-3 text-xs">
+                    <span className={`font-semibold ${
+                      preprocessStatus.state === "failed"
+                        ? "text-red-300"
+                        : preprocessStatus.state === "done"
+                          ? "text-green-300"
+                          : "text-brand-300"
+                    }`}>
+                      {preprocessStatus.state === "running"
+                        ? "전처리 진행 중"
+                        : preprocessStatus.state === "done"
+                          ? "전처리 완료"
+                          : "전처리 실패"}
+                    </span>
+                    <span className="text-gray-500 dark:text-gray-400">
+                      {preprocessStatus.current.toLocaleString()} / {preprocessStatus.total.toLocaleString()}장 · {preprocessStatus.pct.toFixed(1)}%
+                    </span>
+                  </div>
+
+                  <div className="mt-2 h-2 overflow-hidden rounded bg-gray-200 dark:bg-gray-800">
+                    <div
+                      className={`h-full transition-all ${
+                        preprocessStatus.state === "failed" ? "bg-red-500" : "bg-brand-500"
+                      }`}
+                      style={{ width: `${Math.min(100, Math.max(0, preprocessStatus.pct))}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-2 grid grid-cols-2 lg:grid-cols-4 gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+                    <span>처리 {preprocessStatus.processed.toLocaleString()}장</span>
+                    <span>스킵 {preprocessStatus.skipped.toLocaleString()}장</span>
+                    <span>절감 {formatBytes(preprocessStatus.saved_bytes)}</span>
+                    <span>경과 {formatDuration(preprocessStatus.elapsed_sec)}</span>
+                  </div>
+
+                  {preprocessStatus.current_image && preprocessStatus.state === "running" && (
+                    <p className="mt-2 truncate text-[11px] text-gray-500 dark:text-gray-400">
+                      현재 파일: {preprocessStatus.current_image}
+                    </p>
+                  )}
+
+                  {preprocessStatus.error && (
+                    <p className="mt-2 text-[11px] text-red-300">
+                      {preprocessStatus.error}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {largeScan && (
+                <div className={`mt-3 text-xs ${largeScan.large_count > 0 ? "text-amber-200" : "text-gray-500 dark:text-gray-400"}`}>
+                  {largeScan.large_count > 0
+                    ? `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.large_count.toLocaleString()}장이 ${largeScan.threshold_mb}MB 이상입니다. 가장 큰 파일: ${largeScan.largest[0]?.label}/${largeScan.largest[0]?.name} (${largeScan.largest[0]?.size_mb}MB)`
+                    : `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.threshold_mb}MB 이상 이미지는 없습니다.`}
+                </div>
+              )}
+
+              {preprocessResult && (
+                <div className="mt-2 text-xs text-green-300">
+                  {preprocessResult.processed.toLocaleString()}장 처리 완료, {formatBytes(preprocessResult.saved_bytes)} 절감
+                  {preprocessResult.skipped > 0 ? `, ${preprocessResult.skipped.toLocaleString()}장 스킵` : ""}
+                </div>
+              )}
+            </div>
 
 
         {/* 그리드 */}

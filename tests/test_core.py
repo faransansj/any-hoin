@@ -10,6 +10,7 @@ from dataset import HoloDataset, get_train_transforms, get_val_transforms
 from crawling.danbooru_crawler import DanbooruCrawler
 from fastapi import HTTPException
 from studio.routers.images import _resolve_image_id, _resolve_label_dir
+import studio.routers.images as images_router
 from studio.routers.labels import _guard_name
 import studio.characters as characters_store
 import studio.routers.characters as characters_router
@@ -41,6 +42,50 @@ def test_holo_dataset_init(mock_dataset_dir):
     assert "char_a" in ds.classes
     assert "char_b" in ds.classes
     assert len(ds.samples) == 20
+
+
+def test_holo_dataset_deep_validation_skips_invalid_images(tmp_path):
+    """강검사에서는 0바이트/깨진 이미지를 학습 샘플에서 제외."""
+    cls_dir = tmp_path / "char_a"
+    cls_dir.mkdir()
+    Image.new("RGB", (100, 100), color="red").save(cls_dir / "valid.jpg")
+    (cls_dir / "empty.png").touch()
+    (cls_dir / "broken.jpg").write_text("not an image", encoding="utf-8")
+
+    ds = HoloDataset(
+        tmp_path,
+        split="train",
+        val_ratio=0,
+        test_ratio=0,
+        deep_validate_images=True,
+    )
+
+    assert len(ds.samples) == 1
+    assert Path(ds.samples[0][0]).name == "valid.jpg"
+    assert {Path(path).name for path, _ in ds.skipped_files} == {
+        "broken.jpg",
+        "empty.png",
+    }
+
+
+def test_holo_dataset_load_time_skips_unreadable_images(tmp_path):
+    """기본 빠른 검사 이후 로딩 실패 파일은 런타임에 건너뜀."""
+    cls_dir = tmp_path / "char_a"
+    cls_dir.mkdir()
+    Image.new("RGB", (100, 100), color="red").save(cls_dir / "valid.jpg")
+    (cls_dir / "broken.jpg").write_text("not an image", encoding="utf-8")
+
+    ds = HoloDataset(tmp_path, split="train", val_ratio=0, test_ratio=0)
+    bad_idx = next(
+        i for i, (path, _) in enumerate(ds.samples)
+        if Path(path).name == "broken.jpg"
+    )
+
+    with pytest.warns(RuntimeWarning, match="Skipping unreadable image"):
+        img, label = ds[bad_idx]
+
+    assert img.shape == (100, 100, 3)
+    assert label == 0
 
 
 def test_holo_dataset_reads_nested_others(tmp_path):
@@ -131,6 +176,40 @@ def test_label_guard_rejects_unsafe_names():
     for name in ("..", ".hidden", "a/b", "a\\b", "a.b"):
         with pytest.raises(HTTPException):
             _guard_name(name)
+
+
+def test_image_preprocess_scan_and_resize(tmp_path, monkeypatch):
+    """데이터셋 페이지 전처리 API가 대형 이미지를 감지하고 축소 저장."""
+    data_dir = tmp_path / "dataset" / "raw"
+    thumb_dir = tmp_path / ".thumbnails"
+    label_dir = data_dir / "char_a"
+    label_dir.mkdir(parents=True)
+
+    rng = np.random.default_rng(42)
+    pixels = rng.integers(0, 255, size=(1200, 1200, 3), dtype=np.uint8)
+    image_path = label_dir / "large.png"
+    Image.fromarray(pixels, "RGB").save(image_path)
+    before_size = image_path.stat().st_size
+
+    monkeypatch.setattr(images_router, "DATASET_DIR", data_dir)
+    monkeypatch.setattr(images_router, "THUMB_DIR", thumb_dir)
+
+    scan = images_router.scan_large_images(label=None, threshold_mb=1, preview_limit=5)
+
+    assert scan["large_count"] == 1
+    assert scan["largest"][0]["id"] == "char_a/large.png"
+
+    result = images_router.preprocess_large_images({
+        "threshold_mb": 1,
+        "max_side": 512,
+        "quality": 88,
+    })
+
+    assert result["processed"] == 1
+    assert result["saved_bytes"] > 0
+    assert image_path.stat().st_size < before_size
+    with Image.open(image_path) as img:
+        assert max(img.size) <= 512
 
 
 def test_character_discovery_recovers_existing_dataset(tmp_path, monkeypatch):
