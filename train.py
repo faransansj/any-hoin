@@ -16,10 +16,7 @@ import time
 import warnings
 from pathlib import Path
 
-# triton-xpu (Intel Arc 용) 은 torch/_dynamo 가 기대하는 triton.language 등의
-# 서브 API 를 구현하지 않는다. 영구적으로 None 으로 마스킹해 ImportError 를
-# 유발함으로써 torch/_dynamo / IPEX 가 triton-free 경로로 동작하게 한다.
-sys.modules.setdefault("triton", None)  # type: ignore[arg-type]
+import xpu_compat
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -47,34 +44,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
-def _ipex_version_ok() -> bool:
-    """IPEX major.minor 이 torch major.minor 와 일치하는지 사전 검증.
-    불일치 시 IPEX __init__.py 가 os._exit(127) 를 호출하므로 반드시 import 전에 확인."""
-    try:
-        from importlib.metadata import version as pkg_version
-        ipex_ver = pkg_version("intel-extension-for-pytorch")
-        torch_mm = ".".join(torch.__version__.split("+")[0].split(".")[:2])
-        ipex_mm  = ".".join(ipex_ver.split("+")[0].split(".")[:2])
-        if torch_mm != ipex_mm:
-            print(
-                f"[WARN] IPEX {ipex_ver} 는 torch {ipex_mm}.x 용이지만 "
-                f"torch {torch.__version__} 가 설치돼 있습니다. "
-                "IPEX 최적화만 건너뜁니다. XPU 자체는 torch.xpu가 사용 가능하면 동작합니다."
-            )
-            return False
-        return True
-    except Exception:
-        return False
-
-
-try:
-    if "+xpu" in torch.__version__ and _ipex_version_ok():
-        import intel_extension_for_pytorch as ipex  # Intel Arc XPU 지원
-        IPEX_AVAILABLE = True
-    else:
-        IPEX_AVAILABLE = False
-except Exception:
-    IPEX_AVAILABLE = False
+IPEX_AVAILABLE = False
 
 
 TRAIN_EVENT_PREFIX = "__HOLOSCOPE_TRAIN_EVENT__ "
@@ -145,51 +115,11 @@ class DeviceUnavailableError(RuntimeError):
     """요청한 가속 장치를 현재 PyTorch 환경에서 사용할 수 없음."""
 
 
-def _xpu_ready() -> bool:
-    """XPU 빌드(+xpu)이고 하드웨어가 실제로 존재하는지 확인.
-    CUDA 빌드에서도 Intel 드라이버가 있으면 is_available()이 True를 반환하지만
-    실제 XPU 연산은 불가능하므로 버전 문자열로 빌드 종류를 먼저 검증한다."""
-    if "+xpu" not in torch.__version__:
-        return False
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            return torch.xpu.is_available()
-    except Exception:
-        return False
-
-
-def _xpu_unavailable_message(option: str) -> str:
-    if "+xpu" not in torch.__version__:
-        return (
-            f"{option} 를 지정했지만 현재 PyTorch는 XPU 빌드가 아닙니다.\n"
-            f"  - installed torch: {torch.__version__}\n"
-            "  - XPU 학습에는 '+xpu' PyTorch 빌드가 필요합니다.\n"
-            "  - Intel Arc를 사용하려면: uv sync --extra arc\n"
-            "  - NVIDIA/CUDA 빌드를 쓰는 환경에서는 device를 auto/cuda/cpu로 선택하세요."
-        )
-    return (
-        f"{option} 를 지정했지만 torch.xpu.is_available() == False 입니다.\n"
-        "  1) Intel GPU 드라이버/Level Zero 설치 확인\n"
-        "  2) 현재 사용자가 render/video 그룹에 포함됐는지 확인\n"
-        "  3) uv sync --extra arc 로 XPU 빌드를 설치했는지 확인\n"
-        "  4) docs/intel_arc_setup.md 참조"
-    )
-
-
 def _require_device_available(device: torch.device, option: str):
-    if device.type == "xpu" and not _xpu_ready():
-        raise DeviceUnavailableError(_xpu_unavailable_message(option))
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise DeviceUnavailableError(
-            f"{option} 를 지정했지만 CUDA를 사용할 수 없습니다.\n"
-            f"  - installed torch: {torch.__version__}\n"
-            "  - NVIDIA GPU/드라이버/CUDA PyTorch 빌드를 확인하거나 auto/cpu를 선택하세요."
-        )
-    if device.type == "mps" and not torch.backends.mps.is_available():
-        raise DeviceUnavailableError(
-            f"{option} 를 지정했지만 Apple MPS를 사용할 수 없습니다. auto/cpu를 선택하세요."
-        )
+    try:
+        xpu_compat.require_device_available(device, option)
+    except RuntimeError as exc:
+        raise DeviceUnavailableError(str(exc)) from exc
 
 
 def detect_device(
@@ -206,30 +136,21 @@ def detect_device(
             _require_device_available(device, f"--device {device_str}")
             return device
     if force_xpu:
-        if _xpu_ready():
+        if xpu_compat.xpu_available():
             return torch.device("xpu")
-        raise DeviceUnavailableError(_xpu_unavailable_message("--xpu"))
-    if _xpu_ready():
+        raise DeviceUnavailableError(xpu_compat.xpu_unavailable_message("--xpu"))
+    if xpu_compat.xpu_available():
         return torch.device("xpu")
-    if torch.cuda.is_available():
+    if xpu_compat.cuda_available():
         return torch.device("cuda")
-    if torch.backends.mps.is_available():
+    if xpu_compat.mps_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
 def make_scaler(device: torch.device, enabled: bool) -> torch.amp.GradScaler:
     """device-aware GradScaler 생성 (XPU / CUDA / CPU)"""
-    dev_type = device.type
-    if dev_type == "xpu":
-        # IPEX XPU는 GradScaler를 직접 지원 (IPEX>=2.1)
-        try:
-            return torch.amp.GradScaler(dev_type, enabled=enabled)
-        except Exception:
-            return torch.amp.GradScaler("cpu", enabled=False)
-    if dev_type == "cuda":
-        return torch.amp.GradScaler("cuda", enabled=enabled)
-    return torch.amp.GradScaler("cpu", enabled=False)
+    return xpu_compat.make_grad_scaler(device.type, enabled=enabled)
 
 
 # ──────────────────────────────────────────────
@@ -237,12 +158,19 @@ def make_scaler(device: torch.device, enabled: bool) -> torch.amp.GradScaler:
 # ──────────────────────────────────────────────
 
 
-def build_model(num_classes: int, pretrained: bool = True) -> nn.Module:
-    model = timm.create_model(
-        "swin_tiny_patch4_window7_224",
-        pretrained=pretrained,
-        num_classes=num_classes,
-    )
+DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
+
+AVAILABLE_BACKBONES = [
+    {"key": "swin_tiny_patch4_window7_224",     "label": "Swin-T · 28M",     "params_m": 28,  "description": "기본 백본 — 빠른 학습"},
+    {"key": "swin_small_patch4_window7_224",    "label": "Swin-S · 50M",     "params_m": 50,  "description": "Tiny 대비 +3~5% 정확도"},
+    {"key": "swin_base_patch4_window7_224",     "label": "Swin-B · 88M",     "params_m": 88,  "description": "고정밀도 — VRAM 2배 이상"},
+    {"key": "convnext_small.fb_in22k_ft_in1k",  "label": "ConvNeXt-S · 50M", "params_m": 50,  "description": "IN-22K 프리트레인, 빠른 수렴"},
+    {"key": "convnext_base.fb_in22k_ft_in1k",   "label": "ConvNeXt-B · 89M", "params_m": 89,  "description": "IN-22K 프리트레인, 고정밀도"},
+]
+
+
+def build_model(num_classes: int, model_name: str = DEFAULT_BACKBONE, pretrained: bool = True) -> nn.Module:
+    model = timm.create_model(model_name, pretrained=pretrained, num_classes=num_classes)
     return model
 
 
@@ -289,7 +217,7 @@ def train_epoch(
     for i, (imgs, labels) in enumerate(tqdm(loader, desc="  train", leave=False)):
         imgs, labels = imgs.to(device), labels.to(device)
 
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+        with xpu_compat.autocast(device.type, enabled=use_amp):
             outputs = model(imgs)
             loss = criterion(outputs, labels)
             loss = loss / accumulation_steps
@@ -341,7 +269,7 @@ def val_epoch(model, loader, criterion, device, use_amp, progress_callback=None)
     for i, (imgs, labels) in enumerate(tqdm(loader, desc="  val", leave=False)):
         imgs, labels = imgs.to(device), labels.to(device)
 
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+        with xpu_compat.autocast(device.type, enabled=use_amp):
             outputs = model(imgs)
             loss = criterion(outputs, labels)
 
@@ -378,7 +306,7 @@ def test_epoch(model, loader, criterion, device, use_amp, num_classes: int):
     for imgs, labels in tqdm(loader, desc="  test", leave=False):
         imgs, labels = imgs.to(device), labels.to(device)
 
-        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+        with xpu_compat.autocast(device.type, enabled=use_amp):
             outputs = model(imgs)
             loss = criterion(outputs, labels)
 
@@ -435,17 +363,106 @@ def load_checkpoint(path, device):
     return torch.load(path, weights_only=False, map_location=device)
 
 
+def load_config_best_val_acc(save_dir: Path) -> float:
+    config_path = save_dir / "config.json"
+    if not config_path.exists():
+        return 0.0
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+        return max(0.0, float(config.get("best_val_acc") or 0.0))
+    except Exception:
+        return 0.0
+
+
+def _optimizer_state_mismatch_reason(optimizer, state: dict) -> str | None:
+    groups = state.get("param_groups")
+    if not isinstance(groups, list):
+        return "param_groups가 없습니다"
+    if len(groups) != len(optimizer.param_groups):
+        return (
+            f"param group 수가 다릅니다 "
+            f"(checkpoint={len(groups)}, current={len(optimizer.param_groups)})"
+        )
+    for idx, (saved_group, current_group) in enumerate(
+        zip(groups, optimizer.param_groups)
+    ):
+        saved_params = saved_group.get("params", [])
+        current_params = current_group.get("params", [])
+        if len(saved_params) != len(current_params):
+            return (
+                f"param group {idx} 크기가 다릅니다 "
+                f"(checkpoint={len(saved_params)}, current={len(current_params)})"
+            )
+    return None
+
+
+def restore_runtime_state(ckpt, optimizer, scheduler, scaler, phase_label: str) -> None:
+    """체크포인트 runtime state를 가능한 만큼 복원.
+
+    모델 가중치 복원 뒤 optimizer/scheduler/scaler가 현재 환경과 안 맞아도
+    학습을 중단하지 않고 새 runtime state로 이어간다.
+    """
+    optimizer_state = ckpt.get("optimizer_state")
+    optimizer_loaded = False
+
+    if optimizer_state:
+        reason = _optimizer_state_mismatch_reason(optimizer, optimizer_state)
+        if reason:
+            print(
+                f"[경고] {phase_label} optimizer_state 불일치 — "
+                f"모델 가중치는 유지하고 optimizer/scheduler를 새로 시작합니다: {reason}"
+            )
+        else:
+            try:
+                optimizer.load_state_dict(optimizer_state)
+                optimizer_loaded = True
+            except Exception as exc:
+                print(
+                    f"[경고] {phase_label} optimizer_state 로드 실패 — "
+                    f"모델 가중치는 유지하고 optimizer/scheduler를 새로 시작합니다: {exc}"
+                )
+
+    if optimizer_loaded:
+        try:
+            scheduler.load_state_dict(ckpt["scheduler_state"])
+        except Exception as exc:
+            print(
+                f"[경고] {phase_label} scheduler_state 로드 실패 — "
+                f"scheduler를 새로 시작합니다: {exc}"
+            )
+
+    scaler_state = ckpt.get("scaler_state")
+    if scaler_state:
+        try:
+            scaler.load_state_dict(scaler_state)
+        except Exception as exc:
+            print(
+                f"[경고] {phase_label} scaler_state 로드 실패 — "
+                f"scaler를 새로 시작합니다: {exc}"
+            )
+
+
 # ──────────────────────────────────────────────
 # 메인 학습
 # ──────────────────────────────────────────────
 
 
 def train(args):
+    global IPEX_AVAILABLE
+
+    finetune = bool(getattr(args, "finetune", False))
+    fresh = bool(getattr(args, "fresh", False))
+
+    if finetune and fresh:
+        raise ValueError("--finetune and --fresh cannot be used together.")
+
     device = detect_device(
         force_xpu=args.xpu,
         force_cpu=args.cpu,
         device_str=args.device,
     )
+    IPEX_AVAILABLE = device.type == "xpu" and xpu_compat.ipex_available()
     # AMP: CUDA/XPU만 활성화. MPS/CPU는 AMP 미지원
     use_amp = device.type in ("cuda", "xpu") and not args.no_amp
     if device.type == "mps" and not args.no_amp:
@@ -489,6 +506,7 @@ def train(args):
             "Populate dataset/raw/<class>/ with images before training."
         )
     print(f"클래스 수: {num_classes}")
+    backbone = getattr(args, "backbone", DEFAULT_BACKBONE)
 
     # 클래스 맵 저장
     save_dir = Path(args.save_dir)
@@ -497,7 +515,7 @@ def train(args):
     train_ds.save_class_map(save_dir / "class_map.json")
 
     # 모델
-    model = build_model(num_classes).to(device)
+    model = build_model(num_classes, backbone).to(device)
 
     # Loss: Label Smoothing으로 과적합 방지
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
@@ -506,16 +524,18 @@ def train(args):
     # IPEX XPU 최적화 적용 여부 플래그
     _use_ipex = IPEX_AVAILABLE and device.type == "xpu"
 
-    best_val_acc = 0.0
+    best_val_acc = max(0.0, float(getattr(args, "initial_best_val_acc", 0.0)))
     patience_counter = 0
     resume_phase, resume_epoch = 1, 0
     ckpt = None
 
     # --finetune: best_model.pth를 로드해 Phase 2부터 추가학습
-    if args.finetune:
+    if finetune:
         best_pth = best_model_path
         if not best_pth.exists():
             raise FileNotFoundError(f"--finetune 모드인데 {best_pth} 가 없습니다.")
+        if best_val_acc <= 0:
+            best_val_acc = load_config_best_val_acc(save_dir)
         state = torch.load(best_pth, weights_only=True, map_location=device)
         current = model.state_dict()
         mismatched = {k for k, v in state.items() if k in current and v.shape != current[k].shape}
@@ -525,11 +545,14 @@ def train(args):
             best_val_acc = 0.0
         model.load_state_dict(state, strict=False)
         resume_phase = 2  # Phase 2(전체 fine-tune)부터 시작
-        print(f"[finetune] {best_pth} 로드 완료 — Phase 2 추가학습 시작")
+        print(
+            f"[finetune] {best_pth} 로드 완료 — Phase 2 추가학습 시작 "
+            f"(initial best_val_acc={best_val_acc:.4f})"
+        )
 
     # 체크포인트 로드 (--finetune 없을 때만)
     ckpt_path = save_dir / "checkpoint.pth"
-    if not args.finetune and ckpt_path.exists():
+    if not finetune and not fresh and ckpt_path.exists():
         ckpt = load_checkpoint(ckpt_path, device)
         resume_phase = ckpt["phase"]
         resume_epoch = ckpt["epoch"]
@@ -547,7 +570,9 @@ def train(args):
             f"체크포인트 로드: Phase {resume_phase}, "
             f"Epoch {resume_epoch}, best_val_acc={best_val_acc:.4f}"
         )
-    elif not args.finetune:
+    elif fresh:
+        print("처음부터 학습 — 기존 checkpoint.pth를 무시합니다.")
+    elif not finetune:
         print("체크포인트 없음 — 처음부터 학습")
 
     # ────────────────────────────────
@@ -565,10 +590,8 @@ def train(args):
         # ipex.optimize()는 Phase 2에서 전체 모델에 한 번만 호출한다.
 
         if ckpt is not None and resume_phase == 1 and resume_epoch > 0:
-            optimizer.load_state_dict(ckpt["optimizer_state"])
-            scheduler.load_state_dict(ckpt["scheduler_state"])
-            scaler.load_state_dict(ckpt["scaler_state"])
             patience_counter = ckpt["patience_counter"]
+            restore_runtime_state(ckpt, optimizer, scheduler, scaler, "Phase 1")
 
         p1_start = resume_epoch + 1
         if p1_start <= args.phase1_epochs:
@@ -667,17 +690,19 @@ def train(args):
     if _use_ipex:
         # 스케줄러 생성 전에 최적화: 스케줄러가 IPEX 래핑된 optimizer를 참조하도록.
         # 전체 파라미터가 언프리즈된 원본 모델에 한 번만 적용.
-        # bf16: Arc 권장(오버플로 없음), fp16: GradScaler 필요
-        dtype = torch.bfloat16 if use_amp else torch.float32
-        model, optimizer = ipex.optimize(model, optimizer=optimizer, dtype=dtype)
+        model, optimizer = xpu_compat.try_ipex_optimize(
+            model,
+            optimizer,
+            use_amp=use_amp,
+        )
 
-    # LR Warmup 설정: 2 epoch 동안 phase2_lr까지 점진적으로 증가
-    warmup_epochs = 2
+    # LR Warmup 설정: phase2_epochs에 따라 warmup 길이를 조정해 T_max >= 1 보장.
+    warmup_epochs = min(2, max(0, args.phase2_epochs - 1))
     warmup_scheduler = LinearLR(
-        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=max(1, warmup_epochs)
     )
     main_scheduler = CosineAnnealingLR(
-        optimizer, T_max=args.phase2_epochs - warmup_epochs
+        optimizer, T_max=max(1, args.phase2_epochs - warmup_epochs)
     )
 
     # SequentialLR를 사용하여 Warmup 후 CosineAnnealing 적용
@@ -691,10 +716,7 @@ def train(args):
     if resume_phase == 2 and ckpt is not None:
         # 중단된 Phase 2 체크포인트에서 재개
         patience_counter = ckpt["patience_counter"]
-        optimizer.load_state_dict(ckpt["optimizer_state"])
-        scheduler.load_state_dict(ckpt["scheduler_state"])
-        if ckpt.get("scaler_state"):
-            scaler.load_state_dict(ckpt["scaler_state"])
+        restore_runtime_state(ckpt, optimizer, scheduler, scaler, "Phase 2")
         p2_start = resume_epoch + 1
     else:
         patience_counter = 0  # Phase 2 새로 시작 (--finetune 포함)
@@ -819,7 +841,7 @@ def train(args):
         "img_size": args.img_size,
         "best_val_acc": best_val_acc,
         "test_acc": test_acc,
-        "model": "swin_tiny_patch4_window7_224",
+        "backbone": backbone,
     }
     with open(save_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
@@ -832,6 +854,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir", default="./dataset/raw")
     parser.add_argument("--save-dir", default="./checkpoints")
+    parser.add_argument("--backbone", default=DEFAULT_BACKBONE, help="timm 백본 모델명")
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
@@ -856,7 +879,18 @@ if __name__ == "__main__":
         help="best_model.pth 로드 후 Phase 2 추가학습 (새 데이터 추가 시)",
     )
     parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="기존 checkpoint.pth를 무시하고 새 모델로 처음부터 학습합니다.",
+    )
+    parser.add_argument(
         "--save-interval", type=int, default=5, help="Save checkpoint every N epochs"
+    )
+    parser.add_argument(
+        "--initial-best-val-acc",
+        type=float,
+        default=0.0,
+        help="Existing best val_acc to preserve when continuing from best_model.pth.",
     )
     parser.add_argument(
         "--patience", type=int, default=7, help="Early stopping patience (0=비활성화)"

@@ -54,6 +54,8 @@ export interface CrawlRateHealth {
   retry_after:      string | null;
   last_api_at:      number | null;
   last_latency_ms:  number | null;
+  resized_images?:  number;
+  resize_saved_bytes?: number;
 }
 
 export interface CrawlProgress {
@@ -232,6 +234,31 @@ export interface TrainingDevicesResponse {
   torch_version: string;
   ipex_version:  string | null;
   devices:       DeviceOption[];
+}
+
+export type TrainingMode = "fresh" | "resume" | "finetune";
+
+export interface TrainingArtifactEntry {
+  exists:   boolean;
+  filename: string;
+  size_mb:  number | null;
+  mtime:    number | null;
+}
+
+export interface TrainingArtifacts {
+  best_model:          TrainingArtifactEntry;
+  checkpoint:          TrainingArtifactEntry;
+  config_best_val_acc: number | null;
+  config_test_acc:     number | null;
+  num_classes:         number | null;
+  config_backbone:     string | null;
+}
+
+export interface BackboneOption {
+  key:         string;
+  label:       string;
+  params_m:    number;
+  description: string;
 }
 
 // ── 잡 상태 ────────────────────────────────────────────

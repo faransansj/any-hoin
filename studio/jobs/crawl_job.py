@@ -45,6 +45,12 @@ class CrawlJob(BaseJob):
         cmd += ["--workers",    str(params.get("workers", 4))]
         cmd += ["--output-dir", params.get("output_dir", "./dataset/raw")]
 
+        if params.get("resize_large_images"):
+            cmd.append("--resize-large-images")
+            cmd += ["--resize-threshold-mb", str(params.get("resize_threshold_mb", 4))]
+            cmd += ["--resize-max-side", str(params.get("resize_max_side", 1536))]
+            cmd += ["--resize-quality", str(params.get("resize_quality", 88))]
+
         # {key: tag} 딕셔너리를 임시 JSON 파일로 전달
         tags_dict: dict[str, str] = params.get("tags_dict", {})
         if tags_dict:
@@ -81,9 +87,9 @@ class CrawlJob(BaseJob):
 
     async def _on_ws_connected(self, ws: WebSocket):
         if self.current_progress is not None:
-            await ws.send_text(json.dumps({"type": "crawl_progress", "data": self.current_progress}))
+            await self._send_ws(ws, {"type": "crawl_progress", "data": self.current_progress})
         if self.health is not None:
-            await ws.send_text(json.dumps({"type": "crawl_health", "data": self.health_snapshot()}))
+            await self._send_ws(ws, {"type": "crawl_health", "data": self.health_snapshot()})
 
     def _format_log_line(self, line: str) -> str | None:
         if CRAWL_EVENT_PREFIX not in line:

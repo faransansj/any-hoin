@@ -2,6 +2,7 @@
 FP16 경량화 + 성능 비교 스크립트
 
 지원 디바이스:
+  - Intel: XPU  (Arc, FP16 네이티브 지원)
   - Mac  : MPS  (Apple Silicon, FP16 네이티브 지원)
   - NVIDIA: CUDA (FP16 네이티브 지원)
   - 기타  : CPU  (변환만 수행, 벤치마크 스킵)
@@ -17,6 +18,7 @@ import os
 import time
 from pathlib import Path
 
+import xpu_compat
 import torch
 import torch.nn as nn
 import timm
@@ -37,11 +39,7 @@ def require_file(path: Path, purpose: str) -> None:
 
 
 def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    return xpu_compat.best_device()
 
 
 def load_model(weights_path: Path, num_classes: int, device: torch.device) -> nn.Module:
@@ -95,10 +93,10 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=(device.type in ("cuda", "xpu")),
     )
 
-    can_benchmark = device.type in ("cuda", "mps")
+    can_benchmark = device.type in ("cuda", "mps", "xpu")
     if not can_benchmark:
         print("\nCPU 환경: 변환만 수행합니다 (벤치마크는 CUDA/MPS에서 실행하세요)\n")
 

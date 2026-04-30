@@ -12,6 +12,7 @@ from fastapi import WebSocket
 
 JobState = Literal["idle", "running", "done", "failed"]
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_WS_SEND_TIMEOUT_SEC = 0.5
 
 
 def _clean_output_line(line: str) -> str:
@@ -40,13 +41,12 @@ class BaseJob:
 
         # 이미 쌓인 로그 재생
         for line in self._log_buffer[-500:]:
-            try:
-                await ws.send_text(json.dumps({"type": "log", "data": line}))
-            except Exception:
-                break
+            if not await self._send_ws(ws, {"type": "log", "data": line}):
+                return
 
         # 현재 상태 전송
-        await ws.send_text(json.dumps({"type": "state", "data": self.state}))
+        if not await self._send_ws(ws, {"type": "state", "data": self.state}):
+            return
         await self._on_ws_connected(ws)
 
         # 연결 유지 (클라이언트가 끊을 때까지 대기)
@@ -59,13 +59,26 @@ class BaseJob:
             self._ws_clients.discard(ws)
 
     async def _broadcast(self, msg: dict):
-        dead: set[WebSocket] = set()
-        for ws in list(self._ws_clients):
-            try:
-                await ws.send_text(json.dumps(msg))
-            except Exception:
-                dead.add(ws)
-        self._ws_clients -= dead
+        clients = list(self._ws_clients)
+        if not clients:
+            return
+
+        payload = json.dumps(msg)
+        await asyncio.gather(
+            *(self._send_payload(ws, payload) for ws in clients),
+            return_exceptions=True,
+        )
+
+    async def _send_ws(self, ws: WebSocket, msg: dict) -> bool:
+        return await self._send_payload(ws, json.dumps(msg))
+
+    async def _send_payload(self, ws: WebSocket, payload: str) -> bool:
+        try:
+            await asyncio.wait_for(ws.send_text(payload), timeout=_WS_SEND_TIMEOUT_SEC)
+            return True
+        except Exception:
+            self._ws_clients.discard(ws)
+            return False
 
     # ── 실행 ─────────────────────────────────────────────────
 

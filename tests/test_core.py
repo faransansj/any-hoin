@@ -1,4 +1,5 @@
 import pytest
+import io
 import numpy as np
 import torch
 from pathlib import Path
@@ -209,6 +210,31 @@ def test_image_preprocess_scan_and_resize(tmp_path, monkeypatch):
     assert result["saved_bytes"] > 0
     assert image_path.stat().st_size < before_size
     with Image.open(image_path) as img:
+        assert max(img.size) <= 512
+
+
+def test_crawler_resizes_large_downloaded_images(tmp_path):
+    """크롤러 다운로드 저장 전처리가 기준 이상 이미지만 축소/압축."""
+    rng = np.random.default_rng(123)
+    pixels = rng.integers(0, 255, size=(1200, 1200, 3), dtype=np.uint8)
+    raw = io.BytesIO()
+    Image.fromarray(pixels, "RGB").save(raw, "PNG")
+    content = raw.getvalue()
+
+    crawler = DanbooruCrawler(
+        output_dir=tmp_path,
+        resize_large_images=True,
+        resize_threshold_mb=0.1,
+        resize_max_side=512,
+        resize_quality=88,
+    )
+
+    resized = crawler._maybe_resize_content(content, tmp_path / "large.png")
+
+    assert len(resized) < len(content)
+    assert crawler.health["resized_images"] == 1
+    assert crawler.health["resize_saved_bytes"] == len(content) - len(resized)
+    with Image.open(io.BytesIO(resized)) as img:
         assert max(img.size) <= 512
 
 

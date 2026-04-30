@@ -40,6 +40,12 @@ function fmtEta(sec: number | null | undefined): string {
   return `${s}s`;
 }
 
+function fmtBytes(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return "0 MB";
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function fmtPhase(phase: string): string {
   if (phase === "starting") return "시작";
   if (phase === "collecting") return "목록 수집";
@@ -95,6 +101,10 @@ export default function Crawl() {
   const [minImages, setMinImages] = useState(500);
   const [maxImages, setMaxImages] = useState(1000);
   const [workers,   setWorkers]   = useState(4);
+  const [resizeLargeImages, setResizeLargeImages] = useState(true);
+  const [resizeThresholdMb, setResizeThresholdMb] = useState(4);
+  const [resizeMaxSide, setResizeMaxSide] = useState(1536);
+  const [resizeQuality, setResizeQuality] = useState(88);
   const [username,  setUsername]  = useState("");
   const [apiKey,    setApiKey]    = useState("");
 
@@ -312,6 +322,10 @@ export default function Crawl() {
       min_images:    minImages,
       max_images:    maxImages,
       workers,
+      resize_large_images: resizeLargeImages,
+      resize_threshold_mb: resizeThresholdMb,
+      resize_max_side: resizeMaxSide,
+      resize_quality: resizeQuality,
       username:      username || undefined,
       api_key:       apiKey   || undefined,
     });
@@ -439,6 +453,11 @@ export default function Crawl() {
             <span>API 요청: <b className="text-gray-200">{crawlHealth.crawler?.api_requests ?? 0}</b></span>
             <span>API 오류: <b className="text-yellow-300">{crawlHealth.crawler?.api_errors ?? 0}</b></span>
             <span>다운로드 오류: <b className="text-yellow-300">{crawlHealth.crawler?.download_errors ?? 0}</b></span>
+            <span>
+              압축:{" "}
+              <b className="text-green-300">{crawlHealth.crawler?.resized_images ?? 0}</b>
+              장 · {fmtBytes(crawlHealth.crawler?.resize_saved_bytes)}
+            </span>
             <span>계정: <b className="text-gray-200">{crawlHealth.crawler?.account_mode ?? "unknown"}</b></span>
             {crawlHealth.remote && (
               <span>
@@ -829,6 +848,61 @@ export default function Crawl() {
                onChange={(e) => setWorkers(+e.target.value)}
                className="input" min={1} max={16} disabled={running}
              />
+           </div>
+
+           <div className="rounded border border-gray-800 bg-gray-950/40 p-3 space-y-2">
+             <label className="flex items-center gap-2 text-xs text-gray-300">
+               <input
+                 type="checkbox"
+                 checked={resizeLargeImages}
+                 onChange={(e) => setResizeLargeImages(e.target.checked)}
+                 className="accent-brand-500"
+                 disabled={running}
+               />
+               대용량 이미지 자동 축소
+             </label>
+             <div className="grid grid-cols-3 gap-2">
+               <label className="space-y-1">
+                 <span className="label-text">기준(MB)</span>
+                 <input
+                   type="number"
+                   value={resizeThresholdMb}
+                   onChange={(e) => setResizeThresholdMb(+e.target.value)}
+                   className="input text-xs py-1"
+                   min={1}
+                   max={64}
+                   disabled={running || !resizeLargeImages}
+                 />
+               </label>
+               <label className="space-y-1">
+                 <span className="label-text">긴 변(px)</span>
+                 <input
+                   type="number"
+                   value={resizeMaxSide}
+                   onChange={(e) => setResizeMaxSide(+e.target.value)}
+                   className="input text-xs py-1"
+                   min={512}
+                   max={4096}
+                   step={128}
+                   disabled={running || !resizeLargeImages}
+                 />
+               </label>
+               <label className="space-y-1">
+                 <span className="label-text">품질</span>
+                 <input
+                   type="number"
+                   value={resizeQuality}
+                   onChange={(e) => setResizeQuality(+e.target.value)}
+                   className="input text-xs py-1"
+                   min={50}
+                   max={100}
+                   disabled={running || !resizeLargeImages}
+                 />
+               </label>
+             </div>
+             <p className="text-[11px] text-gray-500">
+               다운로드한 파일이 기준 용량 이상일 때만 원본보다 작은 압축본을 저장합니다.
+             </p>
            </div>
  
            <hr className="border-gray-700" />

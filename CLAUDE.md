@@ -19,16 +19,26 @@ uv sync --extra logging     # + wandb
 
 GPU extras are mutually exclusive (enforced by `[tool.uv.conflicts]`).
 
+Auto-detect GPU and sync the right profile:
+```bash
+uv run python scripts/sync_backend.py --apply
+```
+
 Optional: copy `.env.example` → `.env` and set `DANBOORU_LOGIN` / `DANBOORU_API_KEY`.
 
 ## Running the Stack
 
-**Backend** (port 8001):
+**Recommended (both services, port management, health check):**
 ```bash
-uv run python studio_api.py
+bash start.sh
 ```
 
-**Frontend** (port 5173):
+**Manual — Backend** (port 8001):
+```bash
+.venv/bin/python studio_api.py   # prefer over 'uv run' to avoid dep re-resolution
+```
+
+**Manual — Frontend** (port 5173):
 ```bash
 cd frontend && npm install && npm run dev
 ```
@@ -39,6 +49,16 @@ After `npm run build`, the backend serves `frontend/dist/` at `/` automatically.
 ```bash
 uv run python main.py
 ```
+
+## Testing
+
+```bash
+uv run pytest                          # all tests
+uv run pytest tests/test_core.py       # single file
+uv run pytest -k test_holo_dataset_split  # single test by name
+```
+
+Tests use `tmp_path` fixtures and `monkeypatch` for filesystem/module isolation; no external services or GPU required.
 
 ## CLI Commands
 
@@ -55,6 +75,7 @@ uv run python train.py \
   --data-dir ./dataset/raw --save-dir ./checkpoints \
   --batch-size 32 --phase1-epochs 5 --phase2-epochs 30 --phase2-lr 1e-5
 ```
+Training modes: `--fresh` (scratch), `--finetune` (load weights, reset head), default = resume.
 
 **Full release pipeline**:
 ```bash
@@ -73,9 +94,9 @@ Routers: `characters`, `crawl`, `labels`, `images`, `training`, `export`, `infer
 All long-running operations (crawl, train, export) share the same pattern:
 
 - **`BaseJob`** — spawns a subprocess, streams `stdout+stderr` line-by-line, broadcasts to WebSocket clients, buffers the last 500 log lines for reconnecting clients. State machine: `idle → running → done/failed`.
-- **`CrawlJob`** — wraps `crawling/danbooru_crawler.py`. Passes a `--tags-file` temp JSON for character tag overrides.
-- **`TrainJob`** — wraps `train.py`. Parses `_METRIC_RE` (epoch metrics) and `_PROGRESS_RE` (tqdm batch progress) from stdout; broadcasts structured `{type: "metric"|"progress", data: ...}` events alongside plain log lines.
-- **`Fp16Job` / `OnnxJob`** — wrap `quantize_fp16.py` / `export_onnx.py`.
+- **`CrawlJob`** — wraps `crawling/danbooru_crawler.py --events`. Passes a `--tags-file` temp JSON for character tag overrides. Parses `CRAWL_EVENT_PREFIX`-prefixed lines for structured progress/health events.
+- **`TrainJob`** — wraps `train.py`. Parses `TRAIN_EVENT_PREFIX`-prefixed JSON events (epoch metrics and tqdm batch progress) from stdout; broadcasts structured `{type: "metric"|"progress", data: ...}` events alongside plain log lines.
+- **`QuantJob` / `OnnxJob`** — wrap `quantize.py --format <fp16|int8|int4|int2>` / `export_onnx.py`.
 
 Each router (e.g. `studio/routers/training.py`) holds a **module-level singleton job instance** and exposes `GET /status`, `POST /start`, `POST /stop`, `GET /metrics`, and `WS /logs`.
 
@@ -94,7 +115,7 @@ Two-phase fine-tuning of `swin_tiny_patch4_window7_224` (~28M params, ImageNet-1
 - **Phase 1** (default 5 epochs): frozen backbone, head only, lr=1e-3.
 - **Phase 2** (default 30 epochs): full unfreeze, CosineAnnealingLR, lr=1e-5.
 - AMP + label smoothing 0.1 + early stopping (`--patience`).
-- Intel Arc XPU support via IPEX; `_ipex_version_ok()` guards against major.minor mismatch before import (mismatched IPEX calls `os._exit(127)`).
+- Intel Arc XPU support is centralized in `xpu_compat.py`; it masks incompatible `triton-xpu`, checks IPEX major.minor before import, and falls back when IPEX optimization is unavailable.
 - Outputs: `checkpoints/best_model.pth`, `class_map.json` (`{idx: char_key}`), `config.json`.
 
 `dataset.py`: `HoloDataset` does 80/10/10 reproducible split by seed; `build_dataloaders()` uses `WeightedRandomSampler` for class imbalance. Augmentation uses geometric transforms with minimal hue shift (±5°) to preserve character-distinguishing colors.
@@ -103,14 +124,15 @@ Two-phase fine-tuning of `swin_tiny_patch4_window7_224` (~28M params, ImageNet-1
 
 React + TypeScript + Vite + Tailwind + Recharts + Zustand.
 
+- **`src/api.ts`** — typed fetch wrapper (`api.get/post/...`) and `api.ws(path)` for WebSocket construction. All requests go to `/api`.
 - **`src/store/jobStore.ts`** — global Zustand store for job states (`crawlState`, `trainState`, `fp16State`, `onnxState`) and training metrics. Pages connect via WebSocket (`ws://localhost:8001/api/<job>/logs`) and push parsed events into this store.
 - **Pages**: `Crawl`, `Dataset`, `Training`, `Export`, `Inference` — each corresponds to one pipeline stage.
 - **`JobConsole`** component renders scrolling log output from the WebSocket stream.
 
 ### Model Export & Inference
 
+- `quantize.py --format <fp16|int8|int4|int2>` — produces quantized checkpoints.
 - `export_onnx.py` — exports `best_model.pth` → `best_model.onnx`.
-- `quantize_fp16.py` — produces `best_model_fp16.pth`.
 - `studio/routers/inference.py` — lazy-loads `ModelLoader` from `main.py`; prefers ONNX session if available, falls back to PyTorch.
 
 ## Key Generated Files (not committed)
@@ -124,4 +146,3 @@ React + TypeScript + Vite + Tailwind + Recharts + Zustand.
 | `checkpoints/class_map.json` | `{idx: char_key}` for inference |
 | `checkpoints/config.json` | Training config + final metrics |
 | `checkpoints/best_model.onnx` | ONNX export |
-| `checkpoints/best_model_fp16.pth` | FP16 export |

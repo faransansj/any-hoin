@@ -10,9 +10,24 @@ import json
 import argparse
 from pathlib import Path
 
+import xpu_compat
 import numpy as np
 import torch
 import timm
+
+_DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
+
+
+def _read_backbone(ckpt_dir: Path) -> str:
+    config_path = ckpt_dir / "config.json"
+    if config_path.exists():
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            return cfg.get("backbone") or cfg.get("model") or _DEFAULT_BACKBONE
+        except Exception:
+            pass
+    return _DEFAULT_BACKBONE
 
 
 def export(args):
@@ -24,10 +39,11 @@ def export(args):
     with open(class_map_path, encoding="utf-8") as f:
         num_classes = len(json.load(f))
 
-    print(f"클래스 수: {num_classes}")
+    backbone = _read_backbone(ckpt_dir)
+    print(f"클래스 수: {num_classes} | 백본: {backbone}")
 
     model = timm.create_model(
-        "swin_tiny_patch4_window7_224",
+        backbone,
         pretrained=False,
         num_classes=num_classes,
     )

@@ -1,50 +1,34 @@
 """학습 라우터 — TrainJob 관리 + 메트릭 조회."""
 
-import warnings
-from importlib.metadata import PackageNotFoundError, version
+import json
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket
 
+import xpu_compat
 from studio.jobs.train_job import TrainJob
 
 PROJECT_ROOT = "."
+CHECKPOINT_DIR = Path("./checkpoints")
+
+AVAILABLE_BACKBONES = [
+    {"key": "swin_tiny_patch4_window7_224",    "label": "Swin-T · 28M",     "params_m": 28,  "description": "기본 백본 — 빠른 학습"},
+    {"key": "swin_small_patch4_window7_224",   "label": "Swin-S · 50M",     "params_m": 50,  "description": "Tiny 대비 +3~5% 정확도"},
+    {"key": "swin_base_patch4_window7_224",    "label": "Swin-B · 88M",     "params_m": 88,  "description": "고정밀도 — VRAM 2배 이상"},
+    {"key": "convnext_small.fb_in22k_ft_in1k", "label": "ConvNeXt-S · 50M", "params_m": 50,  "description": "IN-22K 프리트레인, 빠른 수렴"},
+    {"key": "convnext_base.fb_in22k_ft_in1k",  "label": "ConvNeXt-B · 89M", "params_m": 89,  "description": "IN-22K 프리트레인, 고정밀도"},
+]
+DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
 
 router = APIRouter(prefix="/training", tags=["training"])
 _job   = TrainJob()
 
 
-def _package_version(name: str) -> str | None:
-    try:
-        return version(name)
-    except PackageNotFoundError:
-        return None
-
-
 def _device_status() -> dict:
-    import torch
-
-    torch_version = torch.__version__
-
-    cuda_available = torch.cuda.is_available()
-    mps_available = torch.backends.mps.is_available()
-    xpu_build = "+xpu" in torch_version
-    xpu_available = False
-    xpu_reason = None
-
-    if not xpu_build:
-        xpu_reason = (
-            f"현재 torch {torch_version}는 XPU 빌드가 아닙니다. "
-            "Intel Arc 사용 시 uv sync --extra arc가 필요합니다."
-        )
-    else:
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                xpu_available = torch.xpu.is_available()
-        except Exception as exc:
-            xpu_reason = f"torch.xpu 확인 실패: {exc}"
-        if not xpu_available and xpu_reason is None:
-            xpu_reason = "torch.xpu.is_available() == False 입니다. 드라이버/Level Zero/render 그룹을 확인하세요."
+    torch_version = xpu_compat.torch_version() or "unavailable"
+    cuda_available = xpu_compat.cuda_available()
+    mps_available = xpu_compat.mps_available()
+    xpu = xpu_compat.xpu_status()
 
     devices = [
         {"key": "auto", "label": "auto", "available": True, "reason": None},
@@ -63,17 +47,41 @@ def _device_status() -> dict:
         {
             "key": "xpu",
             "label": "XPU (Intel Arc)",
-            "available": xpu_available,
-            "reason": xpu_reason,
+            "available": xpu["available"],
+            "reason": xpu["reason"],
         },
         {"key": "cpu", "label": "CPU", "available": True, "reason": None},
     ]
 
     return {
         "torch_version": torch_version,
-        "ipex_version": _package_version("intel-extension-for-pytorch"),
+        "ipex_version": xpu_compat.ipex_version(),
         "devices": devices,
     }
+
+
+def _artifact_entry(filename: str) -> dict:
+    path = CHECKPOINT_DIR / filename
+    if not path.exists():
+        return {"exists": False, "filename": filename, "size_mb": None, "mtime": None}
+    stat = path.stat()
+    return {
+        "exists": True,
+        "filename": filename,
+        "size_mb": round(stat.st_size / 1024 ** 2, 1),
+        "mtime": stat.st_mtime,
+    }
+
+
+def _training_config() -> dict:
+    path = CHECKPOINT_DIR / "config.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 @router.get("/status")
@@ -84,6 +92,24 @@ def get_status():
 @router.get("/devices")
 def get_devices():
     return _device_status()
+
+
+@router.get("/backbones")
+def get_backbones():
+    return {"backbones": AVAILABLE_BACKBONES, "default": DEFAULT_BACKBONE}
+
+
+@router.get("/artifacts")
+def get_artifacts():
+    config = _training_config()
+    return {
+        "best_model": _artifact_entry("best_model.pth"),
+        "checkpoint": _artifact_entry("checkpoint.pth"),
+        "config_best_val_acc": config.get("best_val_acc"),
+        "config_test_acc": config.get("test_acc"),
+        "num_classes": config.get("num_classes"),
+        "config_backbone": config.get("backbone") or config.get("model"),
+    }
 
 
 @router.post("/start")

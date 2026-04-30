@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import xpu_compat
 import albumentations as A
 import numpy as np
 from PIL import Image
@@ -11,7 +12,20 @@ CHECKPOINT_DIR = Path("./checkpoints")
 MODEL_PATH = CHECKPOINT_DIR / "best_model.pth"
 ONNX_PATH = CHECKPOINT_DIR / "best_model.onnx"
 CLASS_MAP_PATH = CHECKPOINT_DIR / "class_map.json"
+CONFIG_PATH = CHECKPOINT_DIR / "config.json"
 IMG_SIZE = 224
+_DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
+
+
+def _read_backbone() -> str:
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            return cfg.get("backbone") or cfg.get("model") or _DEFAULT_BACKBONE
+        except Exception:
+            pass
+    return _DEFAULT_BACKBONE
 
 _ORT_PROVIDERS = [
     "ROCMExecutionProvider",
@@ -82,16 +96,20 @@ class ModelLoader:
         import timm
         import torch
 
-        self.torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        backbone = _read_backbone()
+        self.torch_device = xpu_compat.best_device()
         model = timm.create_model(
-            "swin_tiny_patch4_window7_224",
+            backbone,
             pretrained=False,
             num_classes=num_classes,
         )
-        model.load_state_dict(
-            torch.load(MODEL_PATH, map_location=self.torch_device, weights_only=True)
-        )
-        self.torch_model = model.to(self.torch_device).eval()
+        model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
+        try:
+            self.torch_model = model.to(self.torch_device).eval()
+        except Exception as exc:
+            print(f"[device] 모델을 {self.torch_device}로 올리지 못해 CPU로 폴백합니다: {exc}")
+            self.torch_device = torch.device("cpu")
+            self.torch_model = model.to(self.torch_device).eval()
         self.backend = f"torch+{self.torch_device}"
 
     def predict(self, img: Image.Image) -> tuple[str, float]:
@@ -104,9 +122,20 @@ class ModelLoader:
         else:
             import torch
 
-            tensor = torch.from_numpy(inp).to(self.torch_device)
-            with torch.no_grad():
-                logits = self.torch_model(tensor).cpu().numpy()[0]
+            try:
+                tensor = torch.from_numpy(inp).to(self.torch_device)
+                with torch.no_grad():
+                    logits = self.torch_model(tensor).cpu().numpy()[0]
+            except Exception as exc:
+                if self.torch_device.type == "cpu":
+                    raise
+                print(f"[device] 추론 중 {self.torch_device} 실패 — CPU로 재시도합니다: {exc}")
+                self.torch_device = torch.device("cpu")
+                self.torch_model = self.torch_model.to(self.torch_device).eval()
+                tensor = torch.from_numpy(inp).to(self.torch_device)
+                with torch.no_grad():
+                    logits = self.torch_model(tensor).cpu().numpy()[0]
+                self.backend = f"torch+{self.torch_device}"
 
         probs = softmax(logits)
         top_idx = int(probs.argmax())

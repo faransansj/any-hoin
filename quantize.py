@@ -11,12 +11,9 @@ import argparse
 import copy
 import json
 import os
-import sys
 from pathlib import Path
 
-# triton-xpu 가 triton.language 등 서브 API 를 구현하지 않아
-# torch._dynamo import 시 AttributeError 가 발생한다. None 으로 마스킹.
-sys.modules.setdefault("triton", None)  # type: ignore[arg-type]
+import xpu_compat
 
 import timm
 import torch
@@ -25,6 +22,19 @@ import torch.nn as nn
 CHECKPOINT_DIR = Path("checkpoints")
 FP32_PATH      = CHECKPOINT_DIR / "best_model.pth"
 CLASS_MAP_PATH = CHECKPOINT_DIR / "class_map.json"
+CONFIG_PATH    = CHECKPOINT_DIR / "config.json"
+_DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
+
+
+def _read_backbone() -> str:
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                cfg = json.load(f)
+            return cfg.get("backbone") or cfg.get("model") or _DEFAULT_BACKBONE
+        except Exception:
+            pass
+    return _DEFAULT_BACKBONE
 
 OUT_NAMES = {
     "fp16": "best_model_fp16.pth",
@@ -38,7 +48,7 @@ OUT_NAMES = {
 
 def _build_model(num_classes: int) -> nn.Module:
     model = timm.create_model(
-        "swin_tiny_patch4_window7_224",
+        _read_backbone(),
         pretrained=False,
         num_classes=num_classes,
     )

@@ -3,7 +3,7 @@
 - class_map.json의 인덱스를 그대로 유지 (62클래스 출력 보존)
 - 새 데이터에 있는 클래스만 loss 계산 (나머지 클래스 망각 방지)
 - 매우 낮은 lr로 전체 fine-tune (catastrophic forgetting 최소화)
-- Apple Silicon MPS 자동 지원
+- Intel XPU / CUDA / Apple Silicon MPS 자동 지원
 """
 
 import json
@@ -11,6 +11,7 @@ import argparse
 import warnings
 from pathlib import Path
 
+import xpu_compat
 import numpy as np
 import torch
 import torch.nn as nn
@@ -34,11 +35,7 @@ from dataset import (
 # ──────────────────────────────────────────────
 
 def detect_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    return xpu_compat.best_device()
 
 
 # ──────────────────────────────────────────────
@@ -211,7 +208,7 @@ def main(args):
     sample_weights = train_ds.get_sample_weights()
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights))
 
-    pin = device.type == "cuda"
+    pin = device.type in ("cuda", "xpu")
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               sampler=sampler, num_workers=args.num_workers, pin_memory=pin)
     val_loader   = DataLoader(val_ds, batch_size=args.batch_size,

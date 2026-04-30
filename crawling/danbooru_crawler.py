@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 import requests
-from PIL import Image
+from PIL import Image, ImageOps
 
 try:
     from dotenv import load_dotenv
@@ -155,6 +155,10 @@ QUEUE_PAGE_FACTOR = 3           # 필터/중복/다운로드 실패 여유분
 MIN_QUEUE_PAGES = 10
 PAGE_SLEEP      = 0.5           # API 페이지 요청 간격 (초)
 CRAWL_EVENT_PREFIX = "__HOLOSCOPE_CRAWL_EVENT__ "
+MB = 1024 * 1024
+DEFAULT_RESIZE_THRESHOLD_MB = 4.0
+DEFAULT_RESIZE_MAX_SIDE = 1536
+DEFAULT_RESIZE_QUALITY = 88
 
 
 class DanbooruCrawler:
@@ -165,6 +169,10 @@ class DanbooruCrawler:
         output_dir: Path = Path("./dataset/raw"),
         workers: int = 4,
         emit_events: bool = False,
+        resize_large_images: bool = False,
+        resize_threshold_mb: float = DEFAULT_RESIZE_THRESHOLD_MB,
+        resize_max_side: int = DEFAULT_RESIZE_MAX_SIDE,
+        resize_quality: int = DEFAULT_RESIZE_QUALITY,
     ):
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "HoloScope-Crawler/1.0"
@@ -172,7 +180,12 @@ class DanbooruCrawler:
         self.output_dir = Path(output_dir)
         self.workers = workers
         self.emit_events = emit_events
+        self.resize_large_images = resize_large_images
+        self.resize_threshold_bytes = int(max(resize_threshold_mb, 0.0) * MB)
+        self.resize_max_side = max(512, int(resize_max_side))
+        self.resize_quality = max(50, min(100, int(resize_quality)))
         self._hash_lock = Lock()
+        self._health_lock = Lock()
         self.seen_hashes: set[str] = set()
         self._last_progress_emit = 0.0
         self._run_context: dict = {}
@@ -187,6 +200,8 @@ class DanbooruCrawler:
             "retry_after": None,
             "last_api_at": None,
             "last_latency_ms": None,
+            "resized_images": 0,
+            "resize_saved_bytes": 0,
         }
 
     def _emit_event(self, event: str, payload: dict) -> None:
@@ -266,7 +281,7 @@ class DanbooruCrawler:
 
     # ── API ──────────────────────────────────
 
-    def _get_posts(self, tag: str, page: int) -> list[dict]:
+    def _get_posts(self, tag: str, page: int | str) -> list[dict]:
         params = {
             "tags":  f"{tag} rating:general,sensitive",
             "limit": POSTS_PER_PAGE,
@@ -297,15 +312,65 @@ class DanbooruCrawler:
 
     # ── 다운로드 ─────────────────────────────
 
+    def _record_resize_savings(self, saved_bytes: int) -> None:
+        if saved_bytes <= 0:
+            return
+        with self._health_lock:
+            self.health["resized_images"] += 1
+            self.health["resize_saved_bytes"] += saved_bytes
+
+    def _maybe_resize_content(self, content: bytes, save_path: Path) -> bytes:
+        if not self.resize_large_images:
+            return content
+        if len(content) < self.resize_threshold_bytes:
+            return content
+
+        try:
+            with Image.open(io.BytesIO(content)) as src:
+                if getattr(src, "is_animated", False):
+                    return content
+
+                image = ImageOps.exif_transpose(src)
+                original_format = (src.format or save_path.suffix.lstrip(".") or "JPEG").upper()
+                if original_format == "JPG":
+                    original_format = "JPEG"
+                if original_format not in {"JPEG", "PNG", "WEBP"}:
+                    return content
+
+                if max(image.width, image.height) > self.resize_max_side:
+                    image.thumbnail((self.resize_max_side, self.resize_max_side), Image.LANCZOS)
+
+                save_kwargs = {"optimize": True}
+                if original_format in {"JPEG", "WEBP"}:
+                    if image.mode not in {"RGB", "L"}:
+                        image = image.convert("RGB")
+                    save_kwargs["quality"] = self.resize_quality
+                    if original_format == "JPEG":
+                        save_kwargs["progressive"] = True
+                elif original_format == "PNG":
+                    save_kwargs["compress_level"] = 9
+
+                out = io.BytesIO()
+                image.save(out, original_format, **save_kwargs)
+                resized = out.getvalue()
+        except Exception:
+            return content
+
+        if resized and len(resized) < len(content):
+            self._record_resize_savings(len(content) - len(resized))
+            return resized
+        return content
+
     def _download_one(self, url: str, save_path: Path) -> str:
         """단일 이미지 다운로드. 반환값: 'ok' | 'dup' | 'invalid' | 'error'"""
         try:
             r = self.session.get(url, timeout=20)
             if r.status_code == 429:
-                self.health["rate_limited"] = True
-                self.health["last_status"] = 429
-                self.health["retry_after"] = r.headers.get("Retry-After")
-                self.health["download_errors"] += 1
+                with self._health_lock:
+                    self.health["rate_limited"] = True
+                    self.health["last_status"] = 429
+                    self.health["retry_after"] = r.headers.get("Retry-After")
+                    self.health["download_errors"] += 1
                 return "error"
             r.raise_for_status()
 
@@ -322,10 +387,11 @@ class DanbooruCrawler:
             except Exception:
                 return "invalid"
 
-            save_path.write_bytes(r.content)
+            save_path.write_bytes(self._maybe_resize_content(r.content, save_path))
             return "ok"
         except Exception:
-            self.health["download_errors"] += 1
+            with self._health_lock:
+                self.health["download_errors"] += 1
             return "error"
 
     def _collect_queue(
@@ -343,17 +409,25 @@ class DanbooruCrawler:
         """다운로드할 (url, 저장경로) 목록을 API에서 수집 (순차적으로 rate-limit 준수)"""
         queue: list[tuple[str, Path]] = []
         seen_paths: set[Path] = set()
-        page = 1
+        page: int | str = 1
+        last_page_min_id: int | None = None
         target = target if target is not None else need + collected
         char_started_at = char_started_at if char_started_at is not None else time.monotonic()
-        max_pages = max(
+        # Danbooru caps sequential pagination at ~20 pages for anonymous/basic accounts.
+        # max_seq_pages is the threshold to proactively switch to cursor (page=b{id}) mode.
+        max_seq_pages = max(
             MIN_QUEUE_PAGES,
             ((need + POSTS_PER_PAGE - 1) // POSTS_PER_PAGE) * QUEUE_PAGE_FACTOR,
         )
 
-        while len(queue) < need and page <= max_pages:
+        while len(queue) < need:
             posts = self._get_posts(tag, page)
             if not posts:
+                # Sequential pages ran dry — switch to cursor mode if we have a reference ID.
+                if isinstance(page, int) and last_page_min_id is not None:
+                    page = f"b{last_page_min_id}"
+                    last_page_min_id = None
+                    continue
                 break
 
             for post in posts:
@@ -378,7 +452,27 @@ class DanbooruCrawler:
                 seen_paths.add(save_path)
                 queue.append((file_url, save_path))
 
-            page += 1
+            # Advance pagination: track min post ID for cursor-based continuation.
+            page_ids = [p["id"] for p in posts if isinstance(p.get("id"), int)]
+            if page_ids:
+                batch_min_id = min(page_ids)
+                if isinstance(page, int):
+                    last_page_min_id = batch_min_id
+                else:
+                    new_cursor = f"b{batch_min_id}"
+                    if new_cursor == page:
+                        break  # No progress in cursor mode
+                    page = new_cursor
+            else:
+                break  # No usable post IDs — can't advance pagination
+
+            if isinstance(page, int):
+                page += 1
+                # Proactively switch to cursor when sequential limit is reached.
+                if page > max_seq_pages:
+                    page = f"b{last_page_min_id}"
+                    last_page_min_id = None
+
             self._emit_progress(
                 char_name=char_name,
                 char_index=char_index,
@@ -602,7 +696,14 @@ class DanbooruCrawler:
                 f"계정 [dim]│[/] {auth_label}\n"
                 f"대상 [dim]│[/] [cyan]{len(target)}명[/]  "
                 f"기준 [dim]│[/] [green]{min_images}[/]–[green]{max_images}[/]장  "
-                f"워커 [dim]│[/] [cyan]{self.workers}[/]개",
+                f"워커 [dim]│[/] [cyan]{self.workers}[/]개\n"
+                f"압축 [dim]│[/] "
+                f"{'[green]ON[/]' if self.resize_large_images else '[dim]OFF[/]'}"
+                + (
+                    f"  [dim]{self.resize_threshold_bytes / MB:.1f}MB 이상, "
+                    f"긴 변 {self.resize_max_side}px, 품질 {self.resize_quality}[/]"
+                    if self.resize_large_images else ""
+                ),
                 border_style="cyan",
                 title="[bold cyan]설정[/]",
             )
@@ -613,6 +714,10 @@ class DanbooruCrawler:
             "min_images": min_images,
             "max_images": max_images,
             "workers": self.workers,
+            "resize_large_images": self.resize_large_images,
+            "resize_threshold_mb": round(self.resize_threshold_bytes / MB, 2),
+            "resize_max_side": self.resize_max_side,
+            "resize_quality": self.resize_quality,
             "total_target": total_target,
             "health": self._health_snapshot(),
             "updated_at": time.time(),
@@ -807,6 +912,32 @@ if __name__ == "__main__":
         action="store_true",
         help="Studio UI용 구조화 진행 이벤트를 출력하고 Rich 진행바를 비활성화합니다.",
     )
+    parser.add_argument(
+        "--resize-large-images",
+        action="store_true",
+        help="다운로드한 이미지가 기준 용량 이상이면 저장 전에 자동 축소/압축합니다.",
+    )
+    parser.add_argument(
+        "--resize-threshold-mb",
+        type=float,
+        default=DEFAULT_RESIZE_THRESHOLD_MB,
+        metavar="MB",
+        help=f"자동 축소/압축 기준 용량 MB (기본: {DEFAULT_RESIZE_THRESHOLD_MB:g})",
+    )
+    parser.add_argument(
+        "--resize-max-side",
+        type=int,
+        default=DEFAULT_RESIZE_MAX_SIDE,
+        metavar="PX",
+        help=f"자동 축소 시 긴 변 최대 픽셀 (기본: {DEFAULT_RESIZE_MAX_SIDE})",
+    )
+    parser.add_argument(
+        "--resize-quality",
+        type=int,
+        default=DEFAULT_RESIZE_QUALITY,
+        metavar="Q",
+        help=f"JPEG/WebP 저장 품질 50-100 (기본: {DEFAULT_RESIZE_QUALITY})",
+    )
     args = parser.parse_args()
 
     # 우선순위: --tags-file > --members > 전체(HOLOLIVE_MEMBERS)
@@ -830,4 +961,8 @@ if __name__ == "__main__":
         output_dir=Path(args.output_dir),
         workers=args.workers,
         emit_events=args.events,
+        resize_large_images=args.resize_large_images,
+        resize_threshold_mb=args.resize_threshold_mb,
+        resize_max_side=args.resize_max_side,
+        resize_quality=args.resize_quality,
     ).run(min_images=args.min_images, max_images=args.max_images, members=members)

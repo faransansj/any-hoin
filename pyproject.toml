@@ -47,7 +47,7 @@ arc = [
     "torchvision>=0.16.0",
     "triton-xpu ; sys_platform == 'linux'",
     # IPEX major.minor 은 torch major.minor 와 일치해야 함.
-    # 버전 불일치 시 train.py 의 _ipex_version_ok() 가 건너뜀 (XPU는 native 지원으로 동작).
+    # 버전 불일치 시 xpu_compat.py 가 import 전에 감지하고 건너뜀.
     "intel-extension-for-pytorch",
     "oneccl-bind-pt",
 ]

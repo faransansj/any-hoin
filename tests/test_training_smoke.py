@@ -83,3 +83,33 @@ def test_detect_device_rejects_explicit_xpu_without_xpu_build(monkeypatch):
 
     with pytest.raises(RuntimeError, match="XPU 빌드가 아닙니다"):
         train_mod.detect_device(device_str="xpu")
+
+
+def test_restore_runtime_state_skips_mismatched_optimizer(capsys):
+    train_mod = pytest.importorskip("train")
+
+    saved_model = TinyClassifier(2)
+    saved_optimizer = torch.optim.AdamW(saved_model.head.parameters(), lr=1e-3)
+    saved_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(saved_optimizer, T_max=2)
+
+    current_model = TinyClassifier(2)
+    current_optimizer = torch.optim.AdamW(current_model.parameters(), lr=1e-3)
+    current_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        current_optimizer,
+        T_max=2,
+    )
+    scaler = train_mod.make_scaler(torch.device("cpu"), enabled=False)
+
+    train_mod.restore_runtime_state(
+        {
+            "optimizer_state": saved_optimizer.state_dict(),
+            "scheduler_state": saved_scheduler.state_dict(),
+            "scaler_state": {},
+        },
+        current_optimizer,
+        current_scheduler,
+        scaler,
+        "Phase 2",
+    )
+
+    assert "optimizer_state 불일치" in capsys.readouterr().out

@@ -13,6 +13,7 @@ from functools import lru_cache
 from pathlib import Path
 from PIL import Image, UnidentifiedImageError
 
+import xpu_compat
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import albumentations as A

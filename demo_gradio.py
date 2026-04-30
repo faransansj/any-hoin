@@ -9,6 +9,7 @@ import json
 import time
 from pathlib import Path
 
+import xpu_compat
 import gradio as gr
 import torch
 import timm
@@ -41,24 +42,8 @@ except ImportError:
 
 def _detect_device() -> tuple[torch.device, str]:
     """(device, 사람이 읽기 좋은 설명 문자열) 반환"""
-    if hasattr(torch, "xpu") and torch.xpu.is_available():
-        dev = torch.device("xpu")
-        name = torch.xpu.get_device_name(0) if hasattr(torch.xpu, "get_device_name") else "Intel XPU"
-        label = f"Intel Arc GPU (XPU) — {name}"
-    elif torch.cuda.is_available():
-        dev = torch.device("cuda")
-        name = torch.cuda.get_device_name(0)
-        if torch.version.hip is not None:
-            label = f"AMD ROCm GPU — {name} (HIP {torch.version.hip})"
-        else:
-            label = f"NVIDIA CUDA GPU — {name} (CUDA {torch.version.cuda})"
-    elif torch.backends.mps.is_available():
-        dev = torch.device("mps")
-        label = "Apple Silicon GPU (MPS)"
-    else:
-        dev = torch.device("cpu")
-        label = "CPU"
-    return dev, label
+    dev = xpu_compat.best_device()
+    return dev, xpu_compat.device_label(dev)
 
 
 class DemoModelLoader:
@@ -66,6 +51,7 @@ class DemoModelLoader:
         self.device, self.device_label = _detect_device()
         self.current_precision = None
         self.model = None
+        self.use_half = False
 
         with open(CLASS_MAP_PATH, encoding="utf-8") as f:
             raw = json.load(f)
@@ -93,13 +79,23 @@ class DemoModelLoader:
             num_classes=self.num_classes,
         )
         
-        state_dict = torch.load(path, map_location=self.device, weights_only=True)
+        state_dict = torch.load(path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict)
-        model = model.eval().to(self.device)
+        try:
+            model = model.eval().to(self.device)
+        except Exception as exc:
+            print(f"[device] {self.device} 모델 로드 실패 — CPU로 폴백합니다: {exc}")
+            self.device = torch.device("cpu")
+            self.device_label = xpu_compat.device_label(self.device)
+            model = model.eval().to(self.device)
         
-        # FP16 모델인 경우 파라미터 캐스팅 (CPU는 float16 연산이 제한적이라 예외처리 필요할 수 있음)
-        if precision == "FP16" and self.device.type in ["cuda", "mps"]:
-            model = model.half()
+        self.use_half = False
+        if precision == "FP16" and self.device.type in ["cuda", "mps", "xpu"]:
+            try:
+                model = model.half()
+                self.use_half = True
+            except Exception as exc:
+                print(f"[device] FP16 캐스팅 실패 — FP32로 계속합니다: {exc}")
             
         self.model = model
         self.current_precision = precision
@@ -116,7 +112,7 @@ class DemoModelLoader:
 
         tensor = torch.from_numpy(inp).to(self.device)
         
-        if precision == "FP16" and self.device.type in ["cuda", "mps"]:
+        if self.use_half:
             tensor = tensor.half()
 
         t0 = time.time()

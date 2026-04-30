@@ -16,6 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 Backend = str
 VALID_BACKENDS = {"auto", "cpu", "mps", "cuda", "arc", "rocm"}
 
@@ -67,18 +71,21 @@ def _print_check() -> int:
 
     if venv_python.exists() and Path(sys.executable).resolve() != venv_python.resolve():
         code = (
-            "import torch, sys, warnings; "
+            "import xpu_compat; import torch, sys; "
             "print(f'python: {sys.executable}'); "
             "print(f'torch:  {torch.__version__}'); "
             "print(f'cuda:   {torch.cuda.is_available()}'); "
             "print(f'mps:    {torch.backends.mps.is_available()}'); "
-            "warnings.filterwarnings('ignore'); "
-            "print('xpu:    ' + (str(torch.xpu.is_available()) if hasattr(torch, 'xpu') else 'unavailable'))"
+            "print(f'xpu:    {xpu_compat.xpu_available()}')"
         )
-        env = {**os.environ, "PYTHONWARNINGS": "ignore"}
+        pythonpath = str(PROJECT_ROOT)
+        if os.environ.get("PYTHONPATH"):
+            pythonpath = pythonpath + os.pathsep + os.environ["PYTHONPATH"]
+        env = {**os.environ, "PYTHONWARNINGS": "ignore", "PYTHONPATH": pythonpath}
         return subprocess.run([str(venv_python), "-c", code], check=False, env=env).returncode
 
     try:
+        import xpu_compat
         import torch
     except Exception as exc:
         print(f"[error] torch import failed: {exc}", file=sys.stderr)
@@ -88,16 +95,7 @@ def _print_check() -> int:
     print(f"torch:  {torch.__version__}")
     print(f"cuda:   {torch.cuda.is_available()}")
     print(f"mps:    {torch.backends.mps.is_available()}")
-    if hasattr(torch, "xpu"):
-        try:
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                print(f"xpu:    {torch.xpu.is_available()}")
-        except Exception as exc:
-            print(f"xpu:    error: {exc}")
-    else:
-        print("xpu:    unavailable")
+    print(f"xpu:    {xpu_compat.xpu_available()}")
     return 0
 
 

@@ -11,7 +11,16 @@ import JobConsole from "../components/JobConsole";
 import MetricsChart from "../components/MetricsChart";
 import StatusBadge from "../components/StatusBadge";
 import { useJobStore } from "../store/jobStore";
-import type { DeviceOption, TrainMetric, TrainProgress, TrainingDevicesResponse, TrainingStatus } from "../types";
+import type {
+  BackboneOption,
+  DeviceOption,
+  TrainMetric,
+  TrainProgress,
+  TrainingArtifacts,
+  TrainingDevicesResponse,
+  TrainingMode,
+  TrainingStatus,
+} from "../types";
 
 // ── 헬퍼 ────────────────────────────────────────────────
 
@@ -24,6 +33,10 @@ function fmtEta(sec: number): string {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+function fmtPct(value: number | null | undefined): string {
+  return value != null && value > 0 ? `${(value * 100).toFixed(2)}%` : "—";
 }
 
 interface ProgressBarProps {
@@ -77,15 +90,18 @@ export default function Training() {
     trainProgress, setTrainProgress,
   } = useJobStore();
 
-  const [batchSize,     setBatchSize]     = useState(32);
-  const [phase1Epochs,  setPhase1Epochs]  = useState(5);
-  const [phase2Epochs,  setPhase2Epochs]  = useState(30);
-  const [phase2Lr,      setPhase2Lr]      = useState("1e-5");
-  const [patience,      setPatience]      = useState(7);
-  const [device,        setDevice]        = useState("auto");
-  const [deviceOptions, setDeviceOptions] = useState<DeviceOption[]>(DEFAULT_DEVICE_OPTIONS);
-  const [finetune,      setFinetune]      = useState(false);
-  const [noAmp,         setNoAmp]         = useState(false);
+  const [batchSize,       setBatchSize]       = useState(32);
+  const [phase1Epochs,    setPhase1Epochs]    = useState(5);
+  const [phase2Epochs,    setPhase2Epochs]    = useState(30);
+  const [phase2Lr,        setPhase2Lr]        = useState("1e-5");
+  const [patience,        setPatience]        = useState(7);
+  const [device,          setDevice]          = useState("auto");
+  const [deviceOptions,   setDeviceOptions]   = useState<DeviceOption[]>(DEFAULT_DEVICE_OPTIONS);
+  const [backbone,        setBackbone]        = useState("swin_tiny_patch4_window7_224");
+  const [backboneOptions, setBackboneOptions] = useState<BackboneOption[]>([]);
+  const [trainingMode,    setTrainingMode]    = useState<TrainingMode>("resume");
+  const [artifacts,       setArtifacts]       = useState<TrainingArtifacts | null>(null);
+  const [noAmp,           setNoAmp]           = useState(false);
   const [notificationPermission, setNotificationPermission] = useState<NotificationStatus>(
     () => currentNotificationPermission()
   );
@@ -113,7 +129,31 @@ export default function Training() {
         });
       })
       .catch(console.error);
+
+    api.get<TrainingArtifacts>("/training/artifacts")
+      .then(setArtifacts)
+      .catch(console.error);
+
+    api.get<{ backbones: BackboneOption[]; default: string }>("/training/backbones")
+      .then((r) => {
+        setBackboneOptions(r.backbones);
+      })
+      .catch(console.error);
   }, [setMetrics, setTrainProgress, setTrainState]);
+
+  useEffect(() => {
+    if (!artifacts) return;
+    setTrainingMode((current) => {
+      if (current === "resume" && artifacts.checkpoint.exists) return current;
+      if (current === "finetune" && artifacts.best_model.exists) return current;
+      if (artifacts.checkpoint.exists) return "resume";
+      if (artifacts.best_model.exists) return "finetune";
+      return "fresh";
+    });
+    if (artifacts.config_backbone) {
+      setBackbone(artifacts.config_backbone);
+    }
+  }, [artifacts]);
 
   async function startTraining() {
     resetMetrics();
@@ -125,7 +165,10 @@ export default function Training() {
       phase2_lr:     parseFloat(phase2Lr),
       patience,
       device,
-      finetune,
+      backbone,
+      training_mode: trainingMode,
+      finetune: trainingMode === "finetune",
+      initial_best_val_acc: trainingMode === "finetune" ? artifacts?.config_best_val_acc ?? 0 : 0,
       no_amp: noAmp,
     });
     setTrainState("running");
@@ -173,6 +216,34 @@ export default function Training() {
            <p className="text-sm font-medium text-gray-200">{t("training.params_title")}</p>
  
            <div>
+            <label className="label-text">백본 모델</label>
+            <select
+              value={backbone}
+              onChange={(e) => setBackbone(e.target.value)}
+              className="input"
+              disabled={running}
+            >
+              {backboneOptions.length > 0
+                ? backboneOptions.map((b) => (
+                    <option key={b.key} value={b.key}>{b.label}</option>
+                  ))
+                : <option value={backbone}>{backbone}</option>
+              }
+            </select>
+            {backboneOptions.length > 0 && (() => {
+              const selected = backboneOptions.find((b) => b.key === backbone);
+              return selected ? (
+                <p className="mt-1 text-[11px] leading-4 text-gray-500">{selected.description}</p>
+              ) : null;
+            })()}
+            {artifacts?.config_backbone && artifacts.config_backbone !== backbone && (
+              <p className="mt-1 text-[11px] text-amber-400">
+                현재 저장된 모델: {artifacts.config_backbone}
+              </p>
+            )}
+          </div>
+
+          <div>
              <label className="label-text">{t("training.device")}</label>
              <select value={device} onChange={(e) => setDevice(e.target.value)}
                className="input" disabled={running}>
@@ -225,18 +296,37 @@ export default function Training() {
            </div>
 
 
-          <div className="space-y-1 pt-1">
-             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-               <input type="checkbox" checked={finetune} onChange={(e) => setFinetune(e.target.checked)}
-                 className="accent-brand-500" disabled={running} />
-               {t("training.finetune")}
-             </label>
-             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-               <input type="checkbox" checked={noAmp} onChange={(e) => setNoAmp(e.target.checked)}
-                 className="accent-brand-500" disabled={running} />
-               {t("training.no_amp")}
-             </label>
+          <div>
+            <label className="label-text">학습 시작 방식</label>
+            <select
+              value={trainingMode}
+              onChange={(e) => setTrainingMode(e.target.value as TrainingMode)}
+              className="input"
+              disabled={running}
+            >
+              <option value="resume" disabled={!artifacts?.checkpoint.exists}>
+                체크포인트 이어서
+              </option>
+              <option value="finetune" disabled={!artifacts?.best_model.exists}>
+                기존 best_model 파인튜닝
+              </option>
+              <option value="fresh">처음부터 새 학습</option>
+            </select>
+            <p className="mt-1 text-[11px] leading-4 text-gray-500">
+              {trainingMode === "resume"
+                ? `checkpoint.pth에서 이어서 시작합니다. ${artifacts?.checkpoint.exists ? "" : "현재 체크포인트가 없습니다."}`
+                : trainingMode === "finetune"
+                  ? `best_model.pth를 로드해 Phase 2부터 이어갑니다. 기존 best ${fmtPct(artifacts?.config_best_val_acc)}`
+                  : "기존 checkpoint.pth를 무시하고 새 모델로 Phase 1부터 시작합니다."}
+            </p>
+          </div>
 
+          <div className="space-y-1 pt-1">
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" checked={noAmp} onChange={(e) => setNoAmp(e.target.checked)}
+                className="accent-brand-500" disabled={running} />
+              {t("training.no_amp")}
+            </label>
           </div>
 
            <div className="pt-1">

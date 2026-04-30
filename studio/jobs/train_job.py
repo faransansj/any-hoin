@@ -5,6 +5,7 @@ import json
 import re
 import sys
 import time
+from fastapi import WebSocket
 from .base_job import BaseJob
 
 # "  Epoch  5/30 | train_loss: 0.4321  train_acc: 0.8765 | val_loss: 0.4123  val_acc: 0.8823"
@@ -56,23 +57,35 @@ class TrainJob(BaseJob):
         cmd = [sys.executable, "train.py"]
         cmd += ["--data-dir",      params.get("data_dir", "./dataset/raw")]
         cmd += ["--save-dir",      params.get("save_dir", "./checkpoints")]
+        cmd += ["--backbone",      params.get("backbone", "swin_tiny_patch4_window7_224")]
         cmd += ["--batch-size",    str(params.get("batch_size", 32))]
         cmd += ["--phase1-epochs", str(self.phase1_epochs)]
         cmd += ["--phase2-epochs", str(self.phase2_epochs)]
         cmd += ["--phase2-lr",     str(params.get("phase2_lr", 1e-5))]
         cmd += ["--patience",      str(params.get("patience", 7))]
+        cmd += ["--save-interval", str(params.get("save_interval", 1))]
+
+        mode = params.get("training_mode")
+        if mode not in {"fresh", "resume", "finetune"}:
+            mode = "finetune" if params.get("finetune") else "resume"
+
+        initial_best = float(params.get("initial_best_val_acc", 0.0) or 0.0)
+        if initial_best > 0:
+            cmd += ["--initial-best-val-acc", str(initial_best)]
 
         device = params.get("device", "")
         if device and device != "auto":
             cmd += ["--device", device]
-        if params.get("finetune"):
+        if mode == "fresh":
+            cmd.append("--fresh")
+        elif mode == "finetune":
             cmd.append("--finetune")
         if params.get("no_amp"):
             cmd.append("--no-amp")
 
         self.metrics = []
         self.current_phase = 1
-        self.best_val_acc = 0.0
+        self.best_val_acc = initial_best
         self.current_progress = None
         self.started_at = time.time()
         self.finished_at = None
@@ -185,6 +198,13 @@ class TrainJob(BaseJob):
 
     def _record_progress(self, progress: dict):
         self.current_progress = progress
+
+    async def _on_ws_connected(self, ws: WebSocket):
+        for metric in self.metrics:
+            if not await self._send_ws(ws, {"type": "metric", "data": metric}):
+                return
+        if self.current_progress is not None:
+            await self._send_ws(ws, {"type": "progress", "data": self.current_progress})
 
     def _format_log_line(self, line: str) -> str | None:
         if TRAIN_EVENT_PREFIX in line:
