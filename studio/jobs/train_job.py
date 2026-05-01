@@ -83,6 +83,17 @@ class TrainJob(BaseJob):
         if params.get("no_amp"):
             cmd.append("--no-amp")
 
+        face_crop_dir = params.get("face_crop_dir", "")
+        if face_crop_dir:
+            cmd += ["--face-crop-dir", face_crop_dir]
+
+        mixup_alpha  = float(params.get("mixup_alpha",  0.0) or 0.0)
+        cutmix_alpha = float(params.get("cutmix_alpha", 0.0) or 0.0)
+        ema_decay    = float(params.get("ema_decay",    0.0) or 0.0)
+        if mixup_alpha  > 0: cmd += ["--mixup-alpha",  str(mixup_alpha)]
+        if cutmix_alpha > 0: cmd += ["--cutmix-alpha", str(cutmix_alpha)]
+        if ema_decay    > 0: cmd += ["--ema-decay",    str(ema_decay)]
+
         self.metrics = []
         self.current_phase = 1
         self.best_val_acc = initial_best

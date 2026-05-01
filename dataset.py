@@ -223,10 +223,12 @@ def get_train_transforms(img_size: int = 224):
 
 
 def get_val_transforms(img_size: int = 224):
-    """검증/테스트용: 리사이즈 + 정규화만"""
+    """검증/테스트용: ImageNet 표준 평가 전처리 (256 리사이즈 → 224 센터 크롭)"""
+    scale = int(img_size * 256 / 224)
     return A.Compose(
         [
-            A.Resize(img_size, img_size),
+            A.Resize(scale, scale),
+            A.CenterCrop(img_size, img_size),
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ToTensorV2(),
         ]

@@ -97,14 +97,51 @@ export default function Training() {
   const [patience,        setPatience]        = useState(7);
   const [device,          setDevice]          = useState("auto");
   const [deviceOptions,   setDeviceOptions]   = useState<DeviceOption[]>(DEFAULT_DEVICE_OPTIONS);
-  const [backbone,        setBackbone]        = useState("swin_tiny_patch4_window7_224");
+  const [backbone,        setBackbone]        = useState(
+    () => localStorage.getItem("training.backbone") ?? "swin_tiny_patch4_window7_224"
+  );
   const [backboneOptions, setBackboneOptions] = useState<BackboneOption[]>([]);
   const [trainingMode,    setTrainingMode]    = useState<TrainingMode>("resume");
   const [artifacts,       setArtifacts]       = useState<TrainingArtifacts | null>(null);
   const [noAmp,           setNoAmp]           = useState(false);
+  const [mixupAlpha,      setMixupAlpha]      = useState(
+    () => localStorage.getItem("training.mixup_alpha")  ?? "0.0"
+  );
+  const [cutmixAlpha,     setCutmixAlpha]     = useState(
+    () => localStorage.getItem("training.cutmix_alpha") ?? "0.0"
+  );
+  const [emaEnabled,      setEmaEnabled]      = useState(
+    () => localStorage.getItem("training.ema_enabled") === "true"
+  );
+  const [emaDecay,        setEmaDecay]        = useState(
+    () => localStorage.getItem("training.ema_decay") ?? "0.9998"
+  );
   const [notificationPermission, setNotificationPermission] = useState<NotificationStatus>(
     () => currentNotificationPermission()
   );
+
+  // ── 얼굴 크롭 전처리 ─────────────────────────────────────
+  const [segState,     setSegState]     = useState<"idle"|"running"|"done"|"failed">("idle");
+  const [segPct,       setSegPct]       = useState(0);
+  const [segClass,     setSegClass]     = useState("");
+  const [segEta,       setSegEta]       = useState(-1);
+  const [segInputDir,  setSegInputDir]  = useState("./dataset/raw");
+  const [segOutputDir, setSegOutputDir] = useState("./dataset/raw_seg");
+  const [segBackend,   setSegBackend]   = useState<"cascade"|"yolo">("cascade");
+  const [useFaceCrop,  setUseFaceCrop]  = useState(false);
+  const [segLogOpen,   setSegLogOpen]   = useState(false);
+
+  useEffect(() => {
+    api.get<{ state: string; pct: number; current_class: string; eta_sec: number; output_dir: string }>(
+      "/segmentation/status"
+    ).then((r) => {
+      setSegState(r.state as "idle"|"running"|"done"|"failed");
+      setSegPct(r.pct ?? 0);
+      setSegClass(r.current_class ?? "");
+      setSegEta(r.eta_sec ?? -1);
+      if (r.output_dir) setSegOutputDir(r.output_dir);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.get<TrainingStatus>("/training/status")
@@ -150,10 +187,25 @@ export default function Training() {
       if (artifacts.best_model.exists) return "finetune";
       return "fresh";
     });
-    if (artifacts.config_backbone) {
+    if (artifacts.config_backbone && !localStorage.getItem("training.backbone")) {
       setBackbone(artifacts.config_backbone);
     }
   }, [artifacts]);
+
+  async function startSeg() {
+    setSegPct(0);
+    setSegClass("");
+    await api.post("/segmentation/start", {
+      input_dir:   segInputDir,
+      output_dir:  segOutputDir,
+      backend:     segBackend,
+    });
+    setSegState("running");
+  }
+
+  async function stopSeg() {
+    await api.post("/segmentation/stop");
+  }
 
   async function startTraining() {
     resetMetrics();
@@ -163,6 +215,7 @@ export default function Training() {
       phase1_epochs: phase1Epochs,
       phase2_epochs: phase2Epochs,
       phase2_lr:     parseFloat(phase2Lr),
+      face_crop_dir: useFaceCrop ? segOutputDir : "",
       patience,
       device,
       backbone,
@@ -170,6 +223,9 @@ export default function Training() {
       finetune: trainingMode === "finetune",
       initial_best_val_acc: trainingMode === "finetune" ? artifacts?.config_best_val_acc ?? 0 : 0,
       no_amp: noAmp,
+      mixup_alpha:  parseFloat(mixupAlpha)  || 0,
+      cutmix_alpha: parseFloat(cutmixAlpha) || 0,
+      ema_decay:    emaEnabled ? (parseFloat(emaDecay) || 0.9998) : 0,
     });
     setTrainState("running");
   }
@@ -219,7 +275,10 @@ export default function Training() {
             <label className="label-text">백본 모델</label>
             <select
               value={backbone}
-              onChange={(e) => setBackbone(e.target.value)}
+              onChange={(e) => {
+                setBackbone(e.target.value);
+                localStorage.setItem("training.backbone", e.target.value);
+              }}
               className="input"
               disabled={running}
             >
@@ -327,6 +386,63 @@ export default function Training() {
                 className="accent-brand-500" disabled={running} />
               {t("training.no_amp")}
             </label>
+          </div>
+
+          {/* ── Augmentation ── */}
+          <div className="border-t border-gray-800/60 pt-2 space-y-2">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-600">Augmentation Mix</p>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="label-text">
+                  Mixup α <span className="text-gray-600 font-normal">(0=끄기)</span>
+                </label>
+                <input
+                  type="number" step="0.1" min={0} max={2}
+                  value={mixupAlpha}
+                  onChange={(e) => { setMixupAlpha(e.target.value); localStorage.setItem("training.mixup_alpha", e.target.value); }}
+                  className="input" disabled={running}
+                />
+              </div>
+              <div>
+                <label className="label-text">
+                  CutMix α <span className="text-gray-600 font-normal">(0=끄기)</span>
+                </label>
+                <input
+                  type="number" step="0.1" min={0} max={2}
+                  value={cutmixAlpha}
+                  onChange={(e) => { setCutmixAlpha(e.target.value); localStorage.setItem("training.cutmix_alpha", e.target.value); }}
+                  className="input" disabled={running}
+                />
+              </div>
+            </div>
+            <p className="text-[11px] text-gray-600 leading-4">
+              권장: Mixup 0.4 · CutMix 1.0. 둘 다 켜면 배치마다 50/50으로 선택.
+            </p>
+          </div>
+
+          {/* ── EMA ── */}
+          <div className="space-y-1.5">
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input
+                type="checkbox" checked={emaEnabled}
+                onChange={(e) => { setEmaEnabled(e.target.checked); localStorage.setItem("training.ema_enabled", String(e.target.checked)); }}
+                className="accent-brand-500" disabled={running}
+              />
+              EMA (Exponential Moving Average)
+            </label>
+            {emaEnabled && (
+              <div className="pl-5">
+                <label className="label-text">EMA Decay</label>
+                <input
+                  value={emaDecay}
+                  onChange={(e) => { setEmaDecay(e.target.value); localStorage.setItem("training.ema_decay", e.target.value); }}
+                  className="input" disabled={running}
+                />
+                <p className="mt-1 text-[11px] text-gray-600 leading-4">
+                  권장 0.9998 — 클수록 느린 추적, 작을수록 빠른 추적
+                </p>
+              </div>
+            )}
           </div>
 
            <div className="pt-1">
@@ -453,7 +569,118 @@ export default function Training() {
         </div>
       </div>
 
-       {/* ── 로그 ── */}
+       {/* ── 얼굴 크롭 전처리 ── */}
+       <div className="card space-y-3">
+         <button
+           className="flex items-center justify-between w-full text-left"
+           onClick={() => setSegLogOpen((v) => !v)}
+         >
+           <div className="flex items-center gap-2">
+             <p className="text-sm font-medium text-gray-200">{t("training.seg_title")}</p>
+             <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+               segState === "running" ? "bg-brand-900 text-brand-300" :
+               segState === "done"    ? "bg-green-900 text-green-300" :
+               segState === "failed"  ? "bg-red-900 text-red-300"     :
+               "bg-gray-800 text-gray-400"
+             }`}>
+               {t(`training.seg_status_${segState}`)}
+             </span>
+           </div>
+           <span className="text-gray-500 text-xs">{segLogOpen ? "▲" : "▼"}</span>
+         </button>
+
+         {segLogOpen && (
+           <div className="space-y-3 pt-1">
+             <p className="text-[11px] text-gray-500 leading-4">{t("training.seg_hint")}</p>
+
+             <div className="grid grid-cols-2 gap-2">
+               <div>
+                 <label className="label-text">{t("training.seg_input_dir")}</label>
+                 <input value={segInputDir}
+                   onChange={(e) => setSegInputDir(e.target.value)}
+                   className="input font-mono text-xs"
+                   disabled={segState === "running"}
+                 />
+               </div>
+               <div>
+                 <label className="label-text">{t("training.seg_output_dir")}</label>
+                 <input value={segOutputDir}
+                   onChange={(e) => setSegOutputDir(e.target.value)}
+                   className="input font-mono text-xs"
+                   disabled={segState === "running"}
+                 />
+               </div>
+             </div>
+
+             <div>
+               <label className="label-text">{t("training.seg_backend")}</label>
+               <select value={segBackend}
+                 onChange={(e) => setSegBackend(e.target.value as "cascade"|"yolo")}
+                 className="input"
+                 disabled={segState === "running"}
+               >
+                 <option value="cascade">{t("training.seg_backend_cascade")}</option>
+                 <option value="yolo">{t("training.seg_backend_yolo")}</option>
+               </select>
+             </div>
+
+             {/* 진행률 */}
+             {(segState === "running" || (segState === "done" && segPct > 0)) && (
+               <div className="space-y-1.5">
+                 <div className="flex justify-between text-xs text-gray-400">
+                   <span>{segClass || "처리 중..."}</span>
+                   <span className="tabular-nums">
+                     {segPct.toFixed(1)}%
+                     {segEta > 0 ? ` · ${fmtEta(segEta)}` : ""}
+                   </span>
+                 </div>
+                 <ProgressBar pct={segPct} color="bg-teal-500" />
+               </div>
+             )}
+
+             <div className="flex gap-2">
+               {segState !== "running" ? (
+                 <button onClick={startSeg} className="btn-primary flex-1">
+                   {t("training.seg_start_btn")}
+                 </button>
+               ) : (
+                 <button onClick={stopSeg} className="btn-danger flex-1">
+                   {t("training.seg_stop_btn")}
+                 </button>
+               )}
+             </div>
+
+             <JobConsole
+               title={t("training.seg_log_title")}
+               jobPath="/segmentation/logs"
+               onState={(s) => {
+                 setSegState(s as "idle"|"running"|"done"|"failed");
+               }}
+               onMessage={(msg) => {
+                 if (msg.type === "seg_progress") {
+                   const d = msg.data as { pct?: number; class?: string; eta_sec?: number };
+                   setSegPct(d.pct ?? 0);
+                   setSegClass(d.class ?? "");
+                   setSegEta(d.eta_sec ?? -1);
+                 }
+               }}
+             />
+           </div>
+         )}
+
+         {/* 크롭 데이터 학습 토글 */}
+         {(segState === "done") && (
+           <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer pt-1 border-t border-gray-800">
+             <input type="checkbox" checked={useFaceCrop}
+               onChange={(e) => setUseFaceCrop(e.target.checked)}
+               className="accent-teal-500" disabled={running} />
+             <span>{t("training.seg_use_cropped")}</span>
+             <span className="text-gray-600 font-mono text-[10px]">{segOutputDir}</span>
+           </label>
+         )}
+       </div>
+
+       {/* ── 학습 로그 ── */}
        <div className="card">
          <JobConsole
            title={t("training.log_title")}

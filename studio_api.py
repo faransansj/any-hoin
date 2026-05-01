@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from studio.routers import characters, crawl, export, images, inference, labels, training
+from studio.routers import characters, crawl, export, images, inference, labels, training, segmentation
 
 PROJECT_ROOT = Path(__file__).parent
 
@@ -40,7 +40,7 @@ app.add_middleware(
 # ── API 라우터 ──────────────────────────────────────────
 
 for router in [characters.router, crawl.router, labels.router, images.router,
-               training.router, export.router, inference.router]:
+               training.router, export.router, inference.router, segmentation.router]:
     app.include_router(router, prefix="/api")
 
 # ── 헬스체크 ────────────────────────────────────────────

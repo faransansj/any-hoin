@@ -52,6 +52,8 @@ arc = [
     "oneccl-bind-pt",
 ]
 logging = ["wandb>=0.16.0"]
+# 얼굴 감지/크롭 전처리 — uv sync --extra seg
+seg = ["opencv-python-headless>=4.9"]
 
 [tool.uv]
 conflicts = [

@@ -47,6 +47,8 @@ interface Props {
   onProgress?: (p: TrainProgress) => void;
   onCrawlProgress?: (p: CrawlProgress) => void;
   onCrawlHealth?:   (h: CrawlHealthResponse) => void;
+  /** 타입별 핸들러가 없는 메시지를 포함한 모든 메시지 콜백 */
+  onMessage?:  (msg: { type: string; data: unknown }) => void;
   maxLines?:   number;
 }
 
@@ -58,6 +60,7 @@ export default function JobConsole({
   onProgress,
   onCrawlProgress,
   onCrawlHealth,
+  onMessage,
   maxLines = 400,
 }: Props) {
   const [lines, setLines] = useState<string[]>([]);
@@ -109,6 +112,9 @@ export default function JobConsole({
             onCrawlProgress(msg.data as CrawlProgress);
           } else if (msg.type === "crawl_health" && onCrawlHealth) {
             onCrawlHealth(msg.data as CrawlHealthResponse);
+          }
+          if (onMessage) {
+            onMessage(msg as { type: string; data: unknown });
           }
         } catch {
           /* 무시 */

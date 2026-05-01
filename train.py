@@ -1,13 +1,16 @@
 """
-Swin Transformer-Tiny 학습 스크립트
+이미지 분류 학습 스크립트
 - Phase 1: Head만 학습 (5 epoch)
 - Phase 2: 전체 fine-tune (낮은 lr)
+- Mixup / CutMix augmentation
+- EMA (Exponential Moving Average)
 - WandB 로깅 (선택)
 - 최고 val_acc 모델 자동 저장
 - Early stopping 지원
 - Intel Arc GPU (XPU) 지원 — IPEX 설치 시 자동 활성화
 """
 
+import copy
 import os
 import sys
 import json
@@ -16,6 +19,7 @@ import time
 import warnings
 from pathlib import Path
 
+import numpy as np
 import xpu_compat
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -39,13 +43,11 @@ from dataset import build_dataloaders
 
 try:
     import wandb
-
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
 
 IPEX_AVAILABLE = False
-
 
 TRAIN_EVENT_PREFIX = "__HOLOSCOPE_TRAIN_EVENT__ "
 
@@ -192,6 +194,68 @@ def unfreeze_all(model: nn.Module):
 
 
 # ──────────────────────────────────────────────
+# Augmentation Mix (Mixup / CutMix)
+# ──────────────────────────────────────────────
+
+
+def _pick_aug(mixup_alpha: float, cutmix_alpha: float) -> str:
+    """두 augmentation이 모두 활성화된 경우 50/50으로 선택."""
+    if mixup_alpha > 0 and cutmix_alpha > 0:
+        return "mixup" if np.random.random() < 0.5 else "cutmix"
+    if mixup_alpha > 0:
+        return "mixup"
+    if cutmix_alpha > 0:
+        return "cutmix"
+    return ""
+
+
+def mixup_data(imgs: torch.Tensor, labels: torch.Tensor, alpha: float):
+    """배치 내 두 샘플을 선형 혼합. lam = Beta(alpha, alpha) 샘플."""
+    lam = float(np.random.beta(alpha, alpha))
+    idx = torch.randperm(imgs.size(0), device=imgs.device)
+    mixed = lam * imgs + (1.0 - lam) * imgs[idx]
+    return mixed, labels, labels[idx], lam
+
+
+def cutmix_data(imgs: torch.Tensor, labels: torch.Tensor, alpha: float):
+    """무작위 직사각형 패치를 교체. 실제 교체 면적 비율로 lam 재계산."""
+    lam = float(np.random.beta(alpha, alpha))
+    idx = torch.randperm(imgs.size(0), device=imgs.device)
+    H, W = imgs.shape[2], imgs.shape[3]
+    cut_rat = (1.0 - lam) ** 0.5
+    cut_h, cut_w = int(H * cut_rat), int(W * cut_rat)
+    cy, cx = np.random.randint(H), np.random.randint(W)
+    y1 = max(0, cy - cut_h // 2);  y2 = min(H, cy + cut_h // 2)
+    x1 = max(0, cx - cut_w // 2);  x2 = min(W, cx + cut_w // 2)
+    mixed = imgs.clone()
+    mixed[:, :, y1:y2, x1:x2] = imgs[idx, :, y1:y2, x1:x2]
+    lam = 1.0 - (y2 - y1) * (x2 - x1) / (H * W)
+    return mixed, labels, labels[idx], lam
+
+
+# ──────────────────────────────────────────────
+# EMA (Exponential Moving Average)
+# ──────────────────────────────────────────────
+
+
+class ModelEMA:
+    """학습 파라미터의 지수 이동 평균 — 추론 시 일관된 정확도 향상."""
+
+    def __init__(self, model: nn.Module, decay: float = 0.9998):
+        self.ema = copy.deepcopy(model).eval()
+        self.decay = decay
+        for p in self.ema.parameters():
+            p.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for ema_p, model_p in zip(self.ema.parameters(), model.parameters()):
+            ema_p.lerp_(model_p.detach().to(ema_p.device), 1.0 - self.decay)
+        for ema_b, model_b in zip(self.ema.buffers(), model.buffers()):
+            ema_b.copy_(model_b.to(ema_b.device))
+
+
+# ──────────────────────────────────────────────
 # 학습 루프
 # ──────────────────────────────────────────────
 
@@ -206,6 +270,9 @@ def train_epoch(
     use_amp,
     accumulation_steps=1,
     progress_callback=None,
+    mixup_alpha=0.0,
+    cutmix_alpha=0.0,
+    ema=None,
 ):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -217,15 +284,26 @@ def train_epoch(
     for i, (imgs, labels) in enumerate(tqdm(loader, desc="  train", leave=False)):
         imgs, labels = imgs.to(device), labels.to(device)
 
+        # Mixup / CutMix
+        aug = _pick_aug(mixup_alpha, cutmix_alpha)
+        if aug == "mixup":
+            imgs, y_a, y_b, lam = mixup_data(imgs, labels, mixup_alpha)
+        elif aug == "cutmix":
+            imgs, y_a, y_b, lam = cutmix_data(imgs, labels, cutmix_alpha)
+        else:
+            y_a, y_b, lam = labels, labels, 1.0
+
         with xpu_compat.autocast(device.type, enabled=use_amp):
             outputs = model(imgs)
-            loss = criterion(outputs, labels)
+            if aug:
+                loss = lam * criterion(outputs, y_a) + (1.0 - lam) * criterion(outputs, y_b)
+            else:
+                loss = criterion(outputs, labels)
             loss = loss / accumulation_steps
 
         scaler.scale(loss).backward()
 
         if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
-            # Gradient Clipping 추가
             if use_amp:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -235,8 +313,11 @@ def train_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(model)
 
         total_loss += loss.item() * accumulation_steps * imgs.size(0)
+        # 정확도는 primary label 기준 (Mixup/CutMix 적용 시 근사값)
         correct += (outputs.argmax(1) == labels).sum().item()
         total += imgs.size(0)
 
@@ -463,7 +544,6 @@ def train(args):
         device_str=args.device,
     )
     IPEX_AVAILABLE = device.type == "xpu" and xpu_compat.ipex_available()
-    # AMP: CUDA/XPU만 활성화. MPS/CPU는 AMP 미지원
     use_amp = device.type in ("cuda", "xpu") and not args.no_amp
     if device.type == "mps" and not args.no_amp:
         print(
@@ -472,10 +552,20 @@ def train(args):
         print("   - 기본적으로 FP32로 학습하며, AMP 관련 최적화는 적용되지 않습니다.")
         print("   - 더 빠른 학습을 원하시면 가급적 CUDA/XPU 환경을 권장합니다.")
 
+    mixup_alpha  = float(getattr(args, "mixup_alpha",  0.0))
+    cutmix_alpha = float(getattr(args, "cutmix_alpha", 0.0))
+    ema_decay    = float(getattr(args, "ema_decay",    0.0))
+
+    aug_tags = []
+    if mixup_alpha  > 0: aug_tags.append(f"Mixup(α={mixup_alpha})")
+    if cutmix_alpha > 0: aug_tags.append(f"CutMix(α={cutmix_alpha})")
+    if ema_decay    > 0: aug_tags.append(f"EMA(decay={ema_decay})")
+
     print(
         f"Device: {device} | AMP: {use_amp}"
         + (" | IPEX" if (IPEX_AVAILABLE and device.type == "xpu") else "")
         + (" | Apple Silicon MPS" if device.type == "mps" else "")
+        + (f" | {', '.join(aug_tags)}" if aug_tags else "")
     )
 
     # WandB 초기화
@@ -489,9 +579,20 @@ def train(args):
             name=args.wandb_run,
         )
 
+    # 얼굴 크롭 전처리 (--face-crop-dir 지정 시 해당 디렉토리를 학습 데이터로 사용)
+    effective_data_dir = args.data_dir
+    face_crop_dir = getattr(args, "face_crop_dir", "")
+    if face_crop_dir:
+        import os
+        if os.path.isdir(face_crop_dir):
+            effective_data_dir = face_crop_dir
+            print(f"[얼굴 크롭 데이터] {face_crop_dir} 를 학습 데이터로 사용합니다.")
+        else:
+            print(f"[경고] 얼굴 크롭 디렉토리를 찾을 수 없습니다: {face_crop_dir} — 원본 데이터 사용")
+
     # 데이터로더
     train_loader, val_loader, test_loader, train_ds = build_dataloaders(
-        root_dir=args.data_dir,
+        root_dir=effective_data_dir,
         img_size=args.img_size,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -561,7 +662,6 @@ def train(args):
         current = model.state_dict()
         mismatched = {k for k, v in state.items() if k in current and v.shape != current[k].shape}
         if mismatched:
-            # 클래스 수가 바뀐 경우 head는 현재 모델 초기값을 유지
             print(f"[경고] 체크포인트 클래스 수 불일치 — head 레이어를 재초기화합니다: {mismatched}")
             state = {k: v for k, v in state.items() if k not in mismatched}
             resume_phase, resume_epoch, best_val_acc = 1, 0, 0.0
@@ -574,6 +674,9 @@ def train(args):
         print("처음부터 학습 — 기존 checkpoint.pth를 무시합니다.")
     elif not finetune:
         print("체크포인트 없음 — 처음부터 학습")
+
+    # EMA 초기화 (체크포인트 로드 후, IPEX 최적화 전)
+    ema = ModelEMA(model, decay=ema_decay) if ema_decay > 0 else None
 
     # ────────────────────────────────
     # Phase 1: Head만 학습
@@ -601,18 +704,16 @@ def train(args):
 
         for epoch in range(p1_start, args.phase1_epochs + 1):
             train_loss, train_acc = train_epoch(
-                model,
-                train_loader,
-                criterion,
-                optimizer,
-                device,
-                scaler,
-                use_amp,
+                model, train_loader, criterion, optimizer, device, scaler, use_amp,
                 accumulation_steps=args.accumulation_steps,
                 progress_callback=emit_progress_event,
+                mixup_alpha=mixup_alpha,
+                cutmix_alpha=cutmix_alpha,
+                ema=ema,
             )
+            val_model = ema.ema if ema is not None else model
             val_loss, val_acc = val_epoch(
-                model, val_loader, criterion, device, use_amp, emit_progress_event
+                val_model, val_loader, criterion, device, use_amp, emit_progress_event
             )
             scheduler.step()
 
@@ -621,33 +722,22 @@ def train(args):
                 f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f} | "
                 f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}"
             )
-            emit_metric_event(
-                1,
-                epoch,
-                args.phase1_epochs,
-                train_loss,
-                train_acc,
-                val_loss,
-                val_acc,
-            )
+            emit_metric_event(1, epoch, args.phase1_epochs, train_loss, train_acc, val_loss, val_acc)
 
             if use_wandb:
-                wandb.log(
-                    {
-                        "phase": 1,
-                        "epoch": epoch,
-                        "train/loss": train_loss,
-                        "train/acc": train_acc,
-                        "val/loss": val_loss,
-                        "val/acc": val_acc,
-                        "lr": scheduler.get_last_lr()[0],
-                    }
-                )
+                wandb.log({
+                    "phase": 1, "epoch": epoch,
+                    "train/loss": train_loss, "train/acc": train_acc,
+                    "val/loss": val_loss, "val/acc": val_acc,
+                    "lr": scheduler.get_last_lr()[0],
+                })
 
+            # EMA 활성화 시 EMA 가중치를 best_model로 저장
+            save_sd = (ema.ema if ema is not None else model).state_dict()
             if val_acc > best_val_acc or not best_model_path.exists():
                 best_val_acc = val_acc
                 patience_counter = 0
-                torch.save(model.state_dict(), best_model_path)
+                torch.save(save_sd, best_model_path)
                 print(f"  → best 저장 (val_acc: {val_acc:.4f})")
             else:
                 patience_counter += 1
@@ -657,28 +747,14 @@ def train(args):
 
             if epoch % args.save_interval == 0:
                 save_checkpoint(
-                    ckpt_path,
-                    1,
-                    epoch,
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    best_val_acc,
-                    patience_counter,
+                    ckpt_path, 1, epoch, model, optimizer, scheduler, scaler,
+                    best_val_acc, patience_counter,
                 )
                 print(f"  → periodic checkpoint 저장 (epoch {epoch})")
             elif epoch == args.phase1_epochs:
                 save_checkpoint(
-                    ckpt_path,
-                    1,
-                    epoch,
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    best_val_acc,
-                    patience_counter,
+                    ckpt_path, 1, epoch, model, optimizer, scheduler, scaler,
+                    best_val_acc, patience_counter,
                 )
 
     # ────────────────────────────────
@@ -691,9 +767,7 @@ def train(args):
         # 스케줄러 생성 전에 최적화: 스케줄러가 IPEX 래핑된 optimizer를 참조하도록.
         # 전체 파라미터가 언프리즈된 원본 모델에 한 번만 적용.
         model, optimizer = xpu_compat.try_ipex_optimize(
-            model,
-            optimizer,
-            use_amp=use_amp,
+            model, optimizer, use_amp=use_amp,
         )
 
     # LR Warmup 설정: phase2_epochs에 따라 warmup 길이를 조정해 T_max >= 1 보장.
@@ -730,18 +804,16 @@ def train(args):
 
     for epoch in range(p2_start, args.phase2_epochs + 1):
         train_loss, train_acc = train_epoch(
-            model,
-            train_loader,
-            criterion,
-            optimizer,
-            device,
-            scaler,
-            use_amp,
+            model, train_loader, criterion, optimizer, device, scaler, use_amp,
             accumulation_steps=args.accumulation_steps,
             progress_callback=emit_progress_event,
+            mixup_alpha=mixup_alpha,
+            cutmix_alpha=cutmix_alpha,
+            ema=ema,
         )
+        val_model = ema.ema if ema is not None else model
         val_loss, val_acc = val_epoch(
-            model, val_loader, criterion, device, use_amp, emit_progress_event
+            val_model, val_loader, criterion, device, use_amp, emit_progress_event
         )
         scheduler.step()
 
@@ -750,33 +822,21 @@ def train(args):
             f"train_loss: {train_loss:.4f}  train_acc: {train_acc:.4f} | "
             f"val_loss: {val_loss:.4f}  val_acc: {val_acc:.4f}"
         )
-        emit_metric_event(
-            2,
-            epoch,
-            args.phase2_epochs,
-            train_loss,
-            train_acc,
-            val_loss,
-            val_acc,
-        )
+        emit_metric_event(2, epoch, args.phase2_epochs, train_loss, train_acc, val_loss, val_acc)
 
         if use_wandb:
-            wandb.log(
-                {
-                    "phase": 2,
-                    "epoch": args.phase1_epochs + epoch,
-                    "train/loss": train_loss,
-                    "train/acc": train_acc,
-                    "val/loss": val_loss,
-                    "val/acc": val_acc,
-                    "lr": scheduler.get_last_lr()[0],
-                }
-            )
+            wandb.log({
+                "phase": 2, "epoch": args.phase1_epochs + epoch,
+                "train/loss": train_loss, "train/acc": train_acc,
+                "val/loss": val_loss, "val/acc": val_acc,
+                "lr": scheduler.get_last_lr()[0],
+            })
 
+        save_sd = (ema.ema if ema is not None else model).state_dict()
         if val_acc > best_val_acc or not best_model_path.exists():
             best_val_acc = val_acc
             patience_counter = 0
-            torch.save(model.state_dict(), best_model_path)
+            torch.save(save_sd, best_model_path)
             print(f"  → best 저장 (val_acc: {val_acc:.4f})")
         else:
             patience_counter += 1
@@ -786,28 +846,14 @@ def train(args):
 
         if epoch % args.save_interval == 0:
             save_checkpoint(
-                ckpt_path,
-                2,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                best_val_acc,
-                patience_counter,
+                ckpt_path, 2, epoch, model, optimizer, scheduler, scaler,
+                best_val_acc, patience_counter,
             )
             print(f"  → periodic checkpoint 저장 (epoch {epoch})")
         elif epoch == args.phase2_epochs:
             save_checkpoint(
-                ckpt_path,
-                2,
-                epoch,
-                model,
-                optimizer,
-                scheduler,
-                scaler,
-                best_val_acc,
-                patience_counter,
+                ckpt_path, 2, epoch, model, optimizer, scheduler, scaler,
+                best_val_acc, patience_counter,
             )
 
     # ────────────────────────────────
@@ -815,9 +861,13 @@ def train(args):
     # ────────────────────────────────
     print(f"\n{'─' * 40}")
     print("테스트 세트 평가")
-    model.load_state_dict(torch.load(best_model_path, weights_only=True))
+    # IPEX 래핑 없는 깨끗한 모델로 평가
+    test_model = build_model(num_classes, backbone).to(device)
+    test_model.load_state_dict(
+        torch.load(best_model_path, weights_only=True, map_location=device)
+    )
     test_loss, test_acc, per_class_acc = test_epoch(
-        model, test_loader, criterion, device, use_amp, num_classes
+        test_model, test_loader, criterion, device, use_amp, num_classes
     )
     print(f"  test_loss: {test_loss:.4f}  test_acc: {test_acc:.4f}")
 
@@ -852,63 +902,47 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="./dataset/raw")
-    parser.add_argument("--save-dir", default="./checkpoints")
-    parser.add_argument("--backbone", default=DEFAULT_BACKBONE, help="timm 백본 모델명")
-    parser.add_argument("--img-size", type=int, default=224)
+    parser.add_argument("--data-dir",  default="./dataset/raw")
+    parser.add_argument("--save-dir",  default="./checkpoints")
+    parser.add_argument("--backbone",  default=DEFAULT_BACKBONE, help="timm 백본 모델명")
+    parser.add_argument("--img-size",  type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--phase1-epochs", type=int, default=5)
     parser.add_argument("--phase2-epochs", type=int, default=30)
-    parser.add_argument("--phase2-lr", type=float, default=1e-5)
+    parser.add_argument("--phase2-lr",  type=float, default=1e-5)
     # ── 디바이스 옵션 ──────────────────────────────────
-    parser.add_argument(
-        "--xpu", action="store_true", help="Intel Arc GPU(XPU) 강제 사용 (IPEX 필요)"
-    )
-    parser.add_argument("--cpu", action="store_true", help="CPU 강제 사용")
-    parser.add_argument(
-        "--device", default="", help="디바이스 직접 지정 (예: xpu, xpu:0, cuda:1)"
-    )
-    parser.add_argument(
-        "--no-amp", action="store_true", help="AMP(mixed precision) 비활성화"
-    )
+    parser.add_argument("--xpu",    action="store_true", help="Intel Arc GPU(XPU) 강제 사용 (IPEX 필요)")
+    parser.add_argument("--cpu",    action="store_true", help="CPU 강제 사용")
+    parser.add_argument("--device", default="", help="디바이스 직접 지정 (예: xpu, xpu:0, cuda:1)")
+    parser.add_argument("--no-amp", action="store_true", help="AMP(mixed precision) 비활성화")
     # ── 학습 옵션 ──────────────────────────────────────
-    parser.add_argument(
-        "--finetune",
-        action="store_true",
-        help="best_model.pth 로드 후 Phase 2 추가학습 (새 데이터 추가 시)",
-    )
-    parser.add_argument(
-        "--fresh",
-        action="store_true",
-        help="기존 checkpoint.pth를 무시하고 새 모델로 처음부터 학습합니다.",
-    )
-    parser.add_argument(
-        "--save-interval", type=int, default=5, help="Save checkpoint every N epochs"
-    )
-    parser.add_argument(
-        "--initial-best-val-acc",
-        type=float,
-        default=0.0,
-        help="Existing best val_acc to preserve when continuing from best_model.pth.",
-    )
-    parser.add_argument(
-        "--patience", type=int, default=7, help="Early stopping patience (0=비활성화)"
-    )
-    parser.add_argument("--wandb", action="store_true", help="WandB 로깅 활성화")
+    parser.add_argument("--finetune", action="store_true",
+                        help="best_model.pth 로드 후 Phase 2 추가학습 (새 데이터 추가 시)")
+    parser.add_argument("--fresh",    action="store_true",
+                        help="기존 checkpoint.pth를 무시하고 새 모델로 처음부터 학습합니다.")
+    parser.add_argument("--save-interval", type=int, default=5, help="Save checkpoint every N epochs")
+    parser.add_argument("--initial-best-val-acc", type=float, default=0.0,
+                        help="Existing best val_acc to preserve when continuing from best_model.pth.")
+    parser.add_argument("--patience", type=int, default=7, help="Early stopping patience (0=비활성화)")
+    # ── Augmentation ────────────────────────────────────
+    parser.add_argument("--mixup-alpha",  type=float, default=0.0,
+                        help="Mixup Beta 분포 α — 0=비활성화, 권장 0.4")
+    parser.add_argument("--cutmix-alpha", type=float, default=0.0,
+                        help="CutMix Beta 분포 α — 0=비활성화, 권장 1.0")
+    # ── EMA ─────────────────────────────────────────────
+    parser.add_argument("--ema-decay", type=float, default=0.0,
+                        help="EMA 감쇠율 — 0=비활성화, 권장 0.9998")
+    # ── WandB ─────────────────────────────────────────
+    parser.add_argument("--wandb",         action="store_true", help="WandB 로깅 활성화")
     parser.add_argument("--wandb-project", default="holoscope")
-    parser.add_argument("--wandb-run", default=None, help="WandB 실행 이름 (미지정 시 자동)")
-    parser.add_argument(
-        "--deep-validate-images",
-        action="store_true",
-        help="학습 전 모든 이미지 헤더를 PIL로 검사합니다. 대형 데이터셋에서는 느릴 수 있습니다.",
-    )
-    parser.add_argument(
-        "--accumulation-steps",
-        type=int,
-        default=1,
-        help="Number of steps to accumulate gradients before updating",
-    )
+    parser.add_argument("--wandb-run",     default=None, help="WandB 실행 이름 (미지정 시 자동)")
+    parser.add_argument("--deep-validate-images", action="store_true",
+                        help="학습 전 모든 이미지 헤더를 PIL로 검사합니다. 대형 데이터셋에서는 느릴 수 있습니다.")
+    parser.add_argument("--face-crop-dir", default="",
+                        help="얼굴 크롭 전처리된 데이터셋 경로. 지정 시 --data-dir 대신 사용.")
+    parser.add_argument("--accumulation-steps", type=int, default=1,
+                        help="Number of steps to accumulate gradients before updating")
     args = parser.parse_args()
 
     try:
