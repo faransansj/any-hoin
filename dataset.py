@@ -412,28 +412,43 @@ def build_dataloaders(
         sampler = None
         shuffle = True
 
-    pin = device_type in ("cuda", "xpu")
+    worker_count = max(0, int(num_workers))
+    # Linux + XPU 조합에서 fork 기반 DataLoader가 간헐적으로 멈추는 사례가 있어
+    # XPU는 기본적으로 pin_memory를 끄고, worker 프로세스는 spawn 컨텍스트를 사용한다.
+    pin = device_type == "cuda"
+    loader_kwargs = {
+        "num_workers": worker_count,
+        "pin_memory": pin,
+    }
+    if worker_count > 0:
+        loader_kwargs["timeout"] = 120
+    if worker_count > 0 and device_type == "xpu":
+        loader_kwargs["multiprocessing_context"] = "spawn"
+
+    mp_ctx = loader_kwargs.get("multiprocessing_context", "default")
+    print(
+        f"[DataLoader] device={device_type} num_workers={worker_count} "
+        f"pin_memory={pin} mp_context={mp_ctx}"
+    )
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         sampler=sampler,
         shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin,
+        **loader_kwargs,
     )
     test_loader = DataLoader(
         test_ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin,
+        **loader_kwargs,
     )
 
     return train_loader, val_loader, test_loader, train_ds
