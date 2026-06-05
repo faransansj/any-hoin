@@ -155,23 +155,11 @@ uv sync --extra arc      # Intel Arc XPU
 
 ---
 
-## 🔑 Danbooru API (Optional)
-
-Without credentials, anonymous rate limits and 2-tag search restrictions apply.
-
-```bash
-cp .env.example .env
-# Edit .env — set DANBOORU_LOGIN and DANBOORU_API_KEY
-# Get your key at: https://danbooru.donmai.us/profile
-```
-
----
-
 ## 🛠 Web UI Features
 
 | Page | Description |
 |------|-------------|
-| **Crawl** | Collect images for characters from Danbooru |
+| **Crawl** | Collect images for characters |
 | **Dataset** | Check and manage collected dataset status |
 | **Training** | Start training, monitor Loss/Accuracy in real-time |
 | **Export** | Export trained model (FP16 / INT8 / INT4 / ONNX) |
@@ -261,5 +249,4 @@ Required files:
 ## ⚠️ Notice
 
 - This project is a demo for academic and non-commercial purposes only.
-- All character copyrights belong to © Cover Corp.
 - Please comply with the [Danbooru Terms of Service](https://danbooru.donmai.us/terms_of_service) when crawling.
