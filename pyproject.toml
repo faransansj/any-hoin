@@ -60,6 +60,9 @@ conflicts = [
     [{ extra = "cuda" }, { extra = "rocm" }, { extra = "arc" }],
 ]
 
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
 [tool.uv.sources]
 # torch / torchvision: extra에 따라 다른 인덱스에서 설치
 torch = [
