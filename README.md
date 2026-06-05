@@ -230,6 +230,34 @@ cd frontend && npm install && npm run dev
 
 ---
 
+## 📦 Model Export Packages
+
+Use the Export page's deployment ZIP when moving a model to another environment. A model weight file alone is not enough for inference because the loader also needs the class index mapping and model configuration.
+
+Expected deployable package:
+
+```text
+models/<model-name>/
+  best_model.pth
+  best_model_fp16.pth
+  best_model.onnx
+  best_model.onnx.data
+  class_map.json
+  config.json
+```
+
+Required files:
+
+| File | Required for | Purpose |
+|------|--------------|---------|
+| `class_map.json` | PyTorch and ONNX | Maps model output indices to character keys |
+| `config.json` | PyTorch | Stores class count, image size, backbone, and metrics |
+| `best_model.onnx.data` | ONNX when present | External tensor data referenced by `best_model.onnx` |
+
+`class_map.json` is specific to the exact model output order. Do not copy a class map from another model unless the class count and class order are known to match.
+
+---
+
 ## ⚠️ Notice
 
 - This project is a demo for academic and non-commercial purposes only.

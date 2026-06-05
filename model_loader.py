@@ -17,10 +17,10 @@ IMG_SIZE = 224
 _DEFAULT_BACKBONE = "swin_tiny_patch4_window7_224"
 
 
-def _read_backbone() -> str:
-    if CONFIG_PATH.exists():
+def _read_backbone(config_path: Path = CONFIG_PATH) -> str:
+    if config_path.exists():
         try:
-            with open(CONFIG_PATH, encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 cfg = json.load(f)
             return cfg.get("backbone") or cfg.get("model") or _DEFAULT_BACKBONE
         except Exception:
@@ -42,13 +42,24 @@ def softmax(x: np.ndarray) -> np.ndarray:
 class ModelLoader:
     _instance = None
 
-    def __init__(self):
+    def __init__(
+        self,
+        model_path: Path = MODEL_PATH,
+        onnx_path: Path = ONNX_PATH,
+        class_map_path: Path = CLASS_MAP_PATH,
+        config_path: Path = CONFIG_PATH,
+    ):
+        self.model_path = Path(model_path)
+        self.onnx_path = Path(onnx_path)
+        self.class_map_path = Path(class_map_path)
+        self.config_path = Path(config_path)
         self.session = None
         self.torch_model = None
         self.torch_device = None
         self.idx_to_class: dict[int, str] = {}
         self.transform = None
         self.backend: str = ""
+        self.loaded_path: Path | None = None
         self._load()
 
     @classmethod
@@ -57,22 +68,26 @@ class ModelLoader:
             cls._instance = cls()
         return cls._instance
 
-    def _load(self):
-        if not CLASS_MAP_PATH.exists():
-            raise FileNotFoundError(f"class map not found: {CLASS_MAP_PATH}")
+    @classmethod
+    def reset(cls):
+        cls._instance = None
 
-        with open(CLASS_MAP_PATH, encoding="utf-8") as f:
+    def _load(self):
+        if not self.class_map_path.exists():
+            raise FileNotFoundError(f"class map not found: {self.class_map_path}")
+
+        with open(self.class_map_path, encoding="utf-8") as f:
             raw = json.load(f)
         self.idx_to_class = {int(k): v for k, v in raw.items()}
         num_classes = len(self.idx_to_class)
         if num_classes <= 0:
             raise RuntimeError("class map is empty")
 
-        if ONNX_PATH.exists():
+        if self.onnx_path.exists():
             self._load_onnx()
         else:
-            if not MODEL_PATH.exists():
-                raise FileNotFoundError(f"model not found: {MODEL_PATH}")
+            if not self.model_path.exists():
+                raise FileNotFoundError(f"model not found: {self.model_path}")
             self._load_torch(num_classes)
 
         self.transform = A.Compose([
@@ -80,7 +95,7 @@ class ModelLoader:
             A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-        print(f"model loaded: {num_classes} classes, backend={self.backend}")
+        print(f"model loaded: {num_classes} classes, backend={self.backend}, path={self.loaded_path}")
 
     def _load_onnx(self):
         import onnxruntime as ort
@@ -89,21 +104,22 @@ class ModelLoader:
         providers = [p for p in _ORT_PROVIDERS if p in available]
         if not providers:
             providers = ["CPUExecutionProvider"]
-        self.session = ort.InferenceSession(str(ONNX_PATH), providers=providers)
+        self.session = ort.InferenceSession(str(self.onnx_path), providers=providers)
         self.backend = f"onnx+{providers[0]}"
+        self.loaded_path = self.onnx_path
 
     def _load_torch(self, num_classes: int):
         import timm
         import torch
 
-        backbone = _read_backbone()
+        backbone = _read_backbone(self.config_path)
         self.torch_device = xpu_compat.best_device()
         model = timm.create_model(
             backbone,
             pretrained=False,
             num_classes=num_classes,
         )
-        model.load_state_dict(torch.load(MODEL_PATH, map_location="cpu", weights_only=True))
+        model.load_state_dict(torch.load(self.model_path, map_location="cpu", weights_only=True))
         try:
             self.torch_model = model.to(self.torch_device).eval()
         except Exception as exc:
@@ -111,6 +127,7 @@ class ModelLoader:
             self.torch_device = torch.device("cpu")
             self.torch_model = model.to(self.torch_device).eval()
         self.backend = f"torch+{self.torch_device}"
+        self.loaded_path = self.model_path
 
     def predict(self, img: Image.Image) -> tuple[str, float]:
         img_np = np.array(img.convert("RGB"))

@@ -1,5 +1,6 @@
 import pytest
 import io
+import zipfile
 import numpy as np
 import torch
 from pathlib import Path
@@ -16,6 +17,9 @@ from studio.routers.labels import _guard_name
 import studio.characters as characters_store
 import studio.routers.characters as characters_router
 import studio.routers.crawl as crawl_router
+import studio.routers.export as export_router
+import studio.routers.inference as inference_router
+import studio.routers.training as training_router
 from scripts.sync_backend import sync_command
 
 # ──────────────────────────────────────────────
@@ -337,6 +341,104 @@ def test_backend_sync_commands_are_unified_profiles():
     assert sync_command("cuda") == ["uv", "sync", "--extra", "cuda"]
     assert sync_command("arc") == ["uv", "sync", "--extra", "arc"]
     assert sync_command("rocm") == ["uv", "sync", "--extra", "rocm"]
+
+
+def test_inference_model_info_uses_selected_model(tmp_path, monkeypatch):
+    """추론 모델 정보는 사용자가 찾기로 선택한 모델을 active로 표시해야 함."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    selected_model = checkpoint_dir / "selected_inference" / "custom_model.pth"
+    selected_model.parent.mkdir()
+    selected_model.write_bytes(b"weights")
+    (selected_model.parent / "class_map.json").write_text('{"0": "char_a"}', encoding="utf-8")
+
+    monkeypatch.setattr(inference_router, "CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(inference_router, "_selected_model_path", selected_model)
+    monkeypatch.setattr(inference_router, "_loader", None)
+
+    info = inference_router.model_info()
+
+    assert info["active_model"] == "custom_model.pth"
+    assert info["custom_model_selected"] is True
+    assert info["model_ready"] is True
+
+
+def test_export_models_includes_inference_metadata(tmp_path, monkeypatch):
+    """내보내기 모델 목록에 추론에 필요한 JSON 메타데이터도 포함."""
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "class_map.json").write_text('{"0": "char_a"}', encoding="utf-8")
+    (checkpoint_dir / "config.json").write_text('{"num_classes": 1}', encoding="utf-8")
+
+    monkeypatch.setattr(export_router, "CHECKPOINT_DIR", checkpoint_dir)
+
+    result = export_router.list_models()
+
+    assert result["models"]["class_map"]["exists"] is True
+    assert result["models"]["class_map"]["filename"] == "class_map.json"
+    assert result["models"]["config"]["exists"] is True
+    assert result["models"]["config"]["filename"] == "config.json"
+
+
+def test_export_package_zip_contains_model_and_metadata(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "best_model.pth").write_bytes(b"weights")
+    (checkpoint_dir / "class_map.json").write_text('{"0": "char_a"}', encoding="utf-8")
+    (checkpoint_dir / "config.json").write_text('{"num_classes": 1}', encoding="utf-8")
+
+    monkeypatch.setattr(export_router, "CHECKPOINT_DIR", checkpoint_dir)
+
+    response = export_router.download_package()
+    zip_path = Path(response.path)
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            names = set(zf.namelist())
+    finally:
+        zip_path.unlink(missing_ok=True)
+
+    assert {"best_model.pth", "class_map.json", "config.json", "manifest.json"} <= names
+
+
+def test_export_package_requires_metadata(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "best_model.pth").write_bytes(b"weights")
+
+    monkeypatch.setattr(export_router, "CHECKPOINT_DIR", checkpoint_dir)
+
+    with pytest.raises(HTTPException, match="class_map.json"):
+        export_router.download_package()
+
+
+def test_training_devices_reports_backend_profile(monkeypatch):
+    """학습 장치 API는 현재 torch 백엔드와 전환 명령을 함께 제공."""
+    monkeypatch.setattr(training_router.xpu_compat, "torch_version", lambda: "2.11.0+cu130")
+    monkeypatch.setattr(training_router.xpu_compat, "cuda_available", lambda: False)
+    monkeypatch.setattr(training_router.xpu_compat, "mps_available", lambda: False)
+    monkeypatch.setattr(training_router.xpu_compat, "xpu_status", lambda: {
+        "build": False,
+        "available": False,
+        "reason": "not xpu",
+    })
+    monkeypatch.setattr(training_router.xpu_compat, "ipex_version", lambda: None)
+    monkeypatch.setattr(training_router, "detect_backend", lambda: "arc")
+
+    status = training_router.get_devices()
+
+    assert status["active_backend"] == "cuda"
+    assert status["recommended_backend"] == "arc"
+    assert status["recommended_sync_command"] == "uv sync --extra arc"
+    assert next(d for d in status["devices"] if d["key"] == "xpu")["sync_command"] == "uv sync --extra arc"
+
+
+def test_training_start_rejects_incompatible_device(monkeypatch):
+    """선택 장치와 현재 torch 빌드가 안 맞으면 학습 subprocess 시작 전 400."""
+    monkeypatch.setattr(training_router.xpu_compat, "xpu_available", lambda: False)
+    monkeypatch.setattr(training_router.xpu_compat, "torch_version", lambda: "2.11.0+cu130")
+
+    with pytest.raises(HTTPException, match="XPU 빌드"):
+        training_router._validate_training_device({"device": "xpu"})
 
 
 # ──────────────────────────────────────────────
