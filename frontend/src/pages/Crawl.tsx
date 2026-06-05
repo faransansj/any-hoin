@@ -29,8 +29,8 @@ interface EditState {
   postCount?: number | null;
 }
 
-function fmtEta(sec: number | null | undefined): string {
-  if (sec == null || sec < 0) return "계산 중";
+function fmtEta(sec: number | null | undefined, isKo: boolean): string {
+  if (sec == null || sec < 0) return isKo ? "계산 중" : "Calculating";
   if (sec === 0) return "0s";
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
@@ -46,11 +46,11 @@ function fmtBytes(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function fmtPhase(phase: string): string {
-  if (phase === "starting") return "시작";
-  if (phase === "collecting") return "목록 수집";
-  if (phase === "downloading") return "다운로드";
-  if (phase === "done") return "완료";
+function fmtPhase(phase: string, isKo: boolean): string {
+  if (phase === "starting") return isKo ? "시작" : "Starting";
+  if (phase === "collecting") return isKo ? "목록 수집" : "Collecting";
+  if (phase === "downloading") return isKo ? "다운로드" : "Downloading";
+  if (phase === "done") return isKo ? "완료" : "Done";
   return phase;
 }
 
@@ -66,7 +66,9 @@ function ProgressBar({ pct, color = "bg-brand-500" }: { pct: number; color?: str
 }
 
 export default function Crawl() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const { crawlState, setCrawlState } = useJobStore();
 
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -217,12 +219,12 @@ export default function Crawl() {
       const existing = new Set(characters.map((c) => c.key));
       setGenreSelected(new Set(r.characters.filter((c) => !existing.has(c.key)).map((c) => c.key)));
       if (r.characters.length === 0) {
-        setGenreErr("해당 장르에서 캐릭터 태그를 찾지 못했습니다.");
+        setGenreErr(tx("해당 장르에서 캐릭터 태그를 찾지 못했습니다.", "No character tags were found for that genre."));
       }
     } catch (e: any) {
       setGenreCandidates([]);
       setGenreSelected(new Set());
-      setGenreErr(e?.message ?? "장르 검색 실패");
+      setGenreErr(e?.message ?? tx("장르 검색 실패", "Genre search failed"));
     } finally {
       setGenreLoading(false);
     }
@@ -255,7 +257,7 @@ export default function Crawl() {
         display_name: item.display_name,
       })),
     });
-    setGenreNotice(`${r.imported}개 추가됨, ${r.skipped}개 건너뜀`);
+    setGenreNotice(tx(`${r.imported}개 추가됨, ${r.skipped}개 건너뜀`, `${r.imported} added, ${r.skipped} skipped`));
     setGenreSelected(new Set());
     loadCharacters();
     loadDatasetDiscovery();
@@ -361,9 +363,12 @@ export default function Crawl() {
     <div className="card space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm font-semibold text-gray-200">크롤러 진행 상황</p>
+          <p className="text-sm font-semibold text-gray-200">{tx("크롤러 진행 상황", "Crawler Progress")}</p>
           <p className="text-xs text-gray-500 mt-0.5">
-            현재 캐릭터, 캐릭터별/전체 이미지 수, ETA, Danbooru rate limit/health 상태를 표시합니다.
+            {tx(
+              "현재 캐릭터, 캐릭터별/전체 이미지 수, ETA, Danbooru rate limit/health 상태를 표시합니다.",
+              "Shows current character, per-character/overall image counts, ETA, and Danbooru rate-limit/health status."
+            )}
           </p>
         </div>
         <button
@@ -374,7 +379,9 @@ export default function Crawl() {
               : "bg-gray-800 text-gray-400 hover:bg-gray-700"
           }`}
         >
-          {healthStreaming ? (healthChecking ? "Health 실시간 확인 중" : "Health 실시간 켜짐") : "Health 실시간 꺼짐"}
+          {healthStreaming
+            ? (healthChecking ? tx("Health 실시간 확인 중", "Health live check running") : tx("Health 실시간 켜짐", "Health live check on"))
+            : tx("Health 실시간 꺼짐", "Health live check off")}
         </button>
       </div>
 
@@ -382,25 +389,25 @@ export default function Crawl() {
         <div className="space-y-4">
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="rounded-lg bg-gray-950 border border-gray-800 p-3">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wider">현재 캐릭터</p>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider">{tx("현재 캐릭터", "Current Character")}</p>
               <p className="mt-1 text-sm font-semibold text-white truncate">{crawlProgress.current_character}</p>
               <p className="mt-1 text-[11px] text-gray-500">
-                {crawlProgress.current_index} / {crawlProgress.total_characters} · {fmtPhase(crawlProgress.phase)}
+                {crawlProgress.current_index} / {crawlProgress.total_characters} · {fmtPhase(crawlProgress.phase, isKo)}
               </p>
             </div>
             <div className="rounded-lg bg-gray-950 border border-gray-800 p-3">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wider">캐릭터 이미지</p>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider">{tx("캐릭터 이미지", "Character Images")}</p>
               <p className="mt-1 text-sm font-semibold text-white tabular-nums">
                 {crawlProgress.char_downloaded.toLocaleString()} / {crawlProgress.char_target.toLocaleString()}
               </p>
-              <p className="mt-1 text-[11px] text-gray-500">남은 시간 {fmtEta(crawlProgress.char_eta_sec)}</p>
+              <p className="mt-1 text-[11px] text-gray-500">{tx("남은 시간", "Time left")} {fmtEta(crawlProgress.char_eta_sec, isKo)}</p>
             </div>
             <div className="rounded-lg bg-gray-950 border border-gray-800 p-3">
-              <p className="text-[10px] text-gray-500 uppercase tracking-wider">전체 이미지</p>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wider">{tx("전체 이미지", "Overall Images")}</p>
               <p className="mt-1 text-sm font-semibold text-white tabular-nums">
                 {crawlProgress.total_downloaded.toLocaleString()} / {crawlProgress.total_target.toLocaleString()}
               </p>
-              <p className="mt-1 text-[11px] text-gray-500">남은 시간 {fmtEta(crawlProgress.overall_eta_sec)}</p>
+              <p className="mt-1 text-[11px] text-gray-500">{tx("남은 시간", "Time left")} {fmtEta(crawlProgress.overall_eta_sec, isKo)}</p>
             </div>
             <div className="rounded-lg bg-gray-950 border border-gray-800 p-3">
               <p className="text-[10px] text-gray-500 uppercase tracking-wider">Danbooru</p>
@@ -415,28 +422,28 @@ export default function Crawl() {
 
           <div className="space-y-2">
             <div className="flex justify-between text-xs text-gray-400">
-              <span>현재 캐릭터 진행률</span>
+              <span>{tx("현재 캐릭터 진행률", "Current Character Progress")}</span>
               <span className="tabular-nums">{crawlProgress.char_pct.toFixed(1)}%</span>
             </div>
             <ProgressBar pct={crawlProgress.char_pct} color="bg-emerald-400" />
             <div className="flex justify-between text-xs text-gray-400">
-              <span>전체 이미지 진행률</span>
+              <span>{tx("전체 이미지 진행률", "Overall Image Progress")}</span>
               <span className="tabular-nums">{crawlProgress.total_pct.toFixed(1)}%</span>
             </div>
             <ProgressBar pct={crawlProgress.total_pct} />
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px] text-gray-400">
-            <span>완료 캐릭터: <b className="text-gray-200">{crawlProgress.completed_characters}</b></span>
-            <span>포함: <b className="text-green-300">{crawlProgress.included}</b></span>
-            <span>스킵: <b className="text-gray-300">{crawlProgress.skipped}</b></span>
-            <span>기준 미달: <b className="text-yellow-300">{crawlProgress.below_threshold}</b></span>
-            <span>속도: <b className="text-gray-200">{crawlProgress.speed_img_s.toFixed(2)} img/s</b></span>
+            <span>{tx("완료 캐릭터", "Completed")}: <b className="text-gray-200">{crawlProgress.completed_characters}</b></span>
+            <span>{tx("포함", "Included")}: <b className="text-green-300">{crawlProgress.included}</b></span>
+            <span>{tx("스킵", "Skipped")}: <b className="text-gray-300">{crawlProgress.skipped}</b></span>
+            <span>{tx("기준 미달", "Below threshold")}: <b className="text-yellow-300">{crawlProgress.below_threshold}</b></span>
+            <span>{tx("속도", "Speed")}: <b className="text-gray-200">{crawlProgress.speed_img_s.toFixed(2)} img/s</b></span>
           </div>
         </div>
       ) : (
         <div className="rounded-lg border border-dashed border-gray-800 bg-gray-950/40 p-6 text-center text-sm text-gray-500">
-          크롤링을 시작하면 캐릭터별/전체 진행률이 여기에 표시됩니다.
+          {tx("크롤링을 시작하면 캐릭터별/전체 진행률이 여기에 표시됩니다.", "Start crawling to see per-character and overall progress here.")}
         </div>
       )}
 
@@ -446,19 +453,19 @@ export default function Crawl() {
             <span>
               Heartbeat:{" "}
               <b className={crawlHealth.heartbeat_ok ? "text-green-300" : "text-red-300"}>
-                {crawlHealth.heartbeat_ok ? "정상" : "지연"}
+                {crawlHealth.heartbeat_ok ? tx("정상", "healthy") : tx("지연", "delayed")}
               </b>
-              {crawlHealth.last_event_age_sec != null ? ` (${crawlHealth.last_event_age_sec}s 전)` : ""}
+              {crawlHealth.last_event_age_sec != null ? tx(` (${crawlHealth.last_event_age_sec}s 전)`, ` (${crawlHealth.last_event_age_sec}s ago)`) : ""}
             </span>
-            <span>API 요청: <b className="text-gray-200">{crawlHealth.crawler?.api_requests ?? 0}</b></span>
-            <span>API 오류: <b className="text-yellow-300">{crawlHealth.crawler?.api_errors ?? 0}</b></span>
-            <span>다운로드 오류: <b className="text-yellow-300">{crawlHealth.crawler?.download_errors ?? 0}</b></span>
+            <span>{tx("API 요청", "API requests")}: <b className="text-gray-200">{crawlHealth.crawler?.api_requests ?? 0}</b></span>
+            <span>{tx("API 오류", "API errors")}: <b className="text-yellow-300">{crawlHealth.crawler?.api_errors ?? 0}</b></span>
+            <span>{tx("다운로드 오류", "Download errors")}: <b className="text-yellow-300">{crawlHealth.crawler?.download_errors ?? 0}</b></span>
             <span>
-              압축:{" "}
+              {tx("압축", "Compression")}:{" "}
               <b className="text-green-300">{crawlHealth.crawler?.resized_images ?? 0}</b>
-              장 · {fmtBytes(crawlHealth.crawler?.resize_saved_bytes)}
+              {tx("장", " images")} · {fmtBytes(crawlHealth.crawler?.resize_saved_bytes)}
             </span>
-            <span>계정: <b className="text-gray-200">{crawlHealth.crawler?.account_mode ?? "unknown"}</b></span>
+            <span>{tx("계정", "Account")}: <b className="text-gray-200">{crawlHealth.crawler?.account_mode ?? "unknown"}</b></span>
             {crawlHealth.remote && (
               <span>
                 Remote:{" "}
@@ -498,10 +505,16 @@ export default function Crawl() {
             <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 flex items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold text-amber-300">
-                  dataset/raw에 등록되지 않은 데이터셋 {discovery.missing.length}개 발견
+                  {tx(
+                    `dataset/raw에 등록되지 않은 데이터셋 ${discovery.missing.length}개 발견`,
+                    `Found ${discovery.missing.length} dataset folders in dataset/raw that are not registered.`
+                  )}
                 </p>
                 <p className="text-[11px] text-amber-100/70 mt-1">
-                  이미지 파일은 삭제되지 않았습니다. 폴더명을 Danbooru 태그로 사용해 characters.json에 다시 등록할 수 있습니다.
+                  {tx(
+                    "이미지 파일은 삭제되지 않았습니다. 폴더명을 Danbooru 태그로 사용해 characters.json에 다시 등록할 수 있습니다.",
+                    "Image files were not deleted. You can re-register them in characters.json using folder names as Danbooru tags."
+                  )}
                 </p>
               </div>
               <button
@@ -509,7 +522,7 @@ export default function Crawl() {
                 disabled={recovering}
                 className="shrink-0 text-xs px-3 py-1.5 rounded bg-amber-500 text-gray-950 hover:bg-amber-400 disabled:opacity-50"
               >
-                {recovering ? "불러오는 중" : "데이터셋 불러오기"}
+                {recovering ? tx("불러오는 중", "Loading...") : tx("데이터셋 불러오기", "Load Dataset")}
               </button>
             </div>
           )}
@@ -518,7 +531,7 @@ export default function Crawl() {
             <span className="text-sm font-medium text-gray-200">{t("crawl.char_label")}</span>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500">
-                {selected.size > 0 ? `${selected.size}${t("dataset.selected_count", { count: selected.size })} /` : ""} 전체 {characters.length}개
+                {selected.size > 0 ? tx(`${selected.size}개 선택 /`, `${selected.size} selected /`) : ""} {tx("전체", "Total")} {characters.length}{tx("개", "")}
               </span>
               <button
                 onClick={toggleVisible}
@@ -548,7 +561,7 @@ export default function Crawl() {
                      className="input text-xs"
                      placeholder="tokino_sora"
                    />
-                   <p className="text-[10px] text-gray-600 mt-0.5">영문·숫자·_ 권장</p>
+                   <p className="text-[10px] text-gray-600 mt-0.5">{tx("영문·숫자·_ 권장", "Use letters, numbers, and _")}</p>
                  </div>
                  <div>
                    <label className="label-text">{t("crawl.name_label")}</label>
@@ -556,7 +569,7 @@ export default function Crawl() {
                      value={newName}
                      onChange={(e) => setNewName(e.target.value)}
                      className="input text-xs"
-                     placeholder="Tokino Sora (선택)"
+                     placeholder={tx("Tokino Sora (선택)", "Tokino Sora (optional)")}
                    />
                  </div>
                  <div>
@@ -590,30 +603,30 @@ export default function Crawl() {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3 space-y-2">
-              <p className="text-xs font-medium text-gray-300">캐릭터 검색/필터</p>
+              <p className="text-xs font-medium text-gray-300">{tx("캐릭터 검색/필터", "Character Search / Filter")}</p>
               <input
                 value={charSearch}
                 onChange={(e) => setCharSearch(e.target.value)}
                 className="input text-xs"
-                placeholder="key, 표시 이름, Danbooru 태그 검색"
+                placeholder={tx("key, 표시 이름, Danbooru 태그 검색", "Search key, display name, Danbooru tag")}
               />
               <select
                 value={charFilter}
                 onChange={(e) => setCharFilter(e.target.value as typeof charFilter)}
                 className="input text-xs"
               >
-                <option value="all">전체</option>
-                <option value="selected">선택된 캐릭터</option>
-                <option value="under_min">최소 이미지 수 미달</option>
-                <option value="others">others 이미지 있음</option>
+                <option value="all">{tx("전체", "All")}</option>
+                <option value="selected">{tx("선택된 캐릭터", "Selected Characters")}</option>
+                <option value="under_min">{tx("최소 이미지 수 미달", "Below Min Images")}</option>
+                <option value="others">{tx("others 이미지 있음", "Has Others Images")}</option>
               </select>
               <p className="text-[11px] text-gray-500">
-                표시 {filteredCharacters.length}개 / 전체 {characters.length}개
+                {tx("표시", "Showing")} {filteredCharacters.length}{tx("개", "")} / {tx("전체", "Total")} {characters.length}{tx("개", "")}
               </p>
             </div>
 
             <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3 space-y-2">
-              <p className="text-xs font-medium text-gray-300">장르로 일괄 추가</p>
+              <p className="text-xs font-medium text-gray-300">{tx("장르로 일괄 추가", "Bulk Add by Genre")}</p>
               <div className="flex gap-2">
                 <input
                   value={genreQuery}
@@ -625,7 +638,7 @@ export default function Crawl() {
                     }
                   }}
                   className="input text-xs"
-                  placeholder="예: blue archive"
+                  placeholder={tx("예: blue archive", "e.g. blue archive")}
                   disabled={genreLoading}
                 />
                 <button
@@ -633,7 +646,7 @@ export default function Crawl() {
                   disabled={genreLoading || genreQuery.trim().length < 2}
                   className="btn-ghost text-xs px-3 py-1 shrink-0"
                 >
-                  {genreLoading ? "검색중" : "검색"}
+                  {genreLoading ? tx("검색중", "Searching") : tx("검색", "Search")}
                 </button>
               </div>
               {genreErr && <p className="text-[11px] text-red-400">{genreErr}</p>}
@@ -642,24 +655,27 @@ export default function Crawl() {
                 <div className="rounded-md border border-gray-800 bg-gray-900">
                   <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-gray-800">
                     <p className="text-xs text-gray-300">
-                      {genreSelected.size} / {genreCandidates.length}개 캐릭터를 추가하겠습니까?
+                      {tx(
+                        `${genreSelected.size} / ${genreCandidates.length}개 캐릭터를 추가하겠습니까?`,
+                        `Add ${genreSelected.size} of ${genreCandidates.length} characters?`
+                      )}
                     </p>
                     <div className="flex gap-2">
                       <button onClick={toggleAllGenreCandidates} className="text-[11px] text-brand-300 hover:text-brand-200">
-                        전체 토글
+                        {tx("전체 토글", "Toggle All")}
                       </button>
                       <button
                         onClick={importGenreCharacters}
                         disabled={genreSelected.size === 0}
                         className="text-[11px] px-2 py-1 rounded bg-brand-600 text-white disabled:opacity-40"
                       >
-                        선택 추가
+                        {tx("선택 추가", "Add Selected")}
                       </button>
                     </div>
                   </div>
                   <details className="group" open>
                     <summary className="cursor-pointer px-3 py-2 text-[11px] text-gray-400 hover:text-gray-200">
-                      후보 리스트 열기/닫기
+                      {tx("후보 리스트 열기/닫기", "Show/Hide Candidates")}
                     </summary>
                     <div className="max-h-52 overflow-y-auto border-t border-gray-800">
                       {genreCandidates.map((candidate) => {
@@ -683,7 +699,7 @@ export default function Crawl() {
                               <span className="block truncate font-mono text-[10px] text-gray-500">{candidate.tag}</span>
                             </span>
                             <span className="shrink-0 text-[10px] text-gray-500">
-                              {exists ? "등록됨" : `${candidate.post_count.toLocaleString()}장`}
+                              {exists ? tx("등록됨", "Registered") : tx(`${candidate.post_count.toLocaleString()}장`, `${candidate.post_count.toLocaleString()} images`)}
                             </span>
                           </label>
                         );
@@ -701,11 +717,11 @@ export default function Crawl() {
 	               <p className="text-xs text-gray-500 text-center py-8">
 	                 {t("crawl.empty_chars")}
 	               </p>
-	             ) : filteredCharacters.length === 0 ? (
-	               <p className="text-xs text-gray-500 text-center py-8">
-	                 검색/필터 조건에 맞는 캐릭터가 없습니다.
-	               </p>
-	             ) : (
+		             ) : filteredCharacters.length === 0 ? (
+		               <p className="text-xs text-gray-500 text-center py-8">
+		                 {tx("검색/필터 조건에 맞는 캐릭터가 없습니다.", "No characters match the search/filter conditions.")}
+		               </p>
+		             ) : (
 
                <table className="w-full text-xs">
                  <thead className="sticky top-0 bg-gray-800 text-gray-400">
@@ -757,7 +773,7 @@ export default function Crawl() {
                               />
                               {editing.postCount != null && (
                                 <p className="text-[10px] text-green-500 mt-0.5">
-                                  {editing.postCount.toLocaleString()}장
+                                  {tx(`${editing.postCount.toLocaleString()}장`, `${editing.postCount.toLocaleString()} images`)}
                                 </p>
                               )}
                             </td>
@@ -798,14 +814,14 @@ export default function Crawl() {
                               <button
                                 onClick={() => setEditing({ key: c.key, tag: c.tag, display_name: c.display_name })}
                                 className="text-gray-500 hover:text-gray-300"
-                                title="수정"
+                                title={tx("수정", "Edit")}
                               >
                                 ✎
                               </button>
                               <button
                                 onClick={() => handleDelete(c.key)}
                                 className="text-gray-600 hover:text-red-400"
-                                title="삭제"
+                                title={tx("삭제", "Delete")}
                               >
                                 ✕
                               </button>
@@ -859,11 +875,11 @@ export default function Crawl() {
                  className="accent-brand-500"
                  disabled={running}
                />
-               대용량 이미지 자동 축소
+               {tx("대용량 이미지 자동 축소", "Auto-resize Large Images")}
              </label>
              <div className="grid grid-cols-3 gap-2">
                <label className="space-y-1">
-                 <span className="label-text">기준(MB)</span>
+                 <span className="label-text">{tx("기준(MB)", "Threshold (MB)")}</span>
                  <input
                    type="number"
                    value={resizeThresholdMb}
@@ -875,7 +891,7 @@ export default function Crawl() {
                  />
                </label>
                <label className="space-y-1">
-                 <span className="label-text">긴 변(px)</span>
+                 <span className="label-text">{tx("긴 변(px)", "Max Side (px)")}</span>
                  <input
                    type="number"
                    value={resizeMaxSide}
@@ -888,7 +904,7 @@ export default function Crawl() {
                  />
                </label>
                <label className="space-y-1">
-                 <span className="label-text">품질</span>
+                 <span className="label-text">{tx("품질", "Quality")}</span>
                  <input
                    type="number"
                    value={resizeQuality}
@@ -901,7 +917,10 @@ export default function Crawl() {
                </label>
              </div>
              <p className="text-[11px] text-gray-500">
-               다운로드한 파일이 기준 용량 이상일 때만 원본보다 작은 압축본을 저장합니다.
+               {tx(
+                 "다운로드한 파일이 기준 용량 이상일 때만 원본보다 작은 압축본을 저장합니다.",
+                 "Saves a compressed file only when downloaded images exceed the threshold and become smaller than originals."
+               )}
              </p>
            </div>
  

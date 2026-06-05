@@ -9,48 +9,34 @@ import { api } from "../api";
 import JobConsole from "../components/JobConsole";
 import StatusBadge from "../components/StatusBadge";
 import { useJobStore } from "../store/jobStore";
+import { useTranslation } from "react-i18next";
 import type { ExportStatus, ModelMap, ModelsResponse, QuantFormat } from "../types";
 
 const QUANT_OPTIONS: {
   value: QuantFormat;
   label: string;
-  desc: string;
-  useCase: string;
-  risk: string;
   recommended?: boolean;
   color: string;
 }[] = [
   {
     value: "fp16",
     label: "FP16",
-    desc: "약 2× 압축",
-    useCase: "GPU/ONNX 배포 전 기본 권장 옵션. 정확도 손실이 거의 없습니다.",
-    risk: "낮음",
     recommended: true,
     color: "text-yellow-300",
   },
   {
     value: "int8",
     label: "INT8",
-    desc: "약 4× 압축",
-    useCase: "모바일/CPU 추론처럼 용량과 속도가 중요할 때 실험용으로 적합합니다.",
-    risk: "중간",
     color: "text-orange-300",
   },
   {
     value: "int4",
     label: "INT4",
-    desc: "약 8× 압축",
-    useCase: "모델 크기를 크게 줄여야 할 때만 사용합니다. 결과 검증이 필요합니다.",
-    risk: "높음",
     color: "text-red-300",
   },
   {
     value: "int2",
     label: "INT2",
-    desc: "약 16× 압축",
-    useCase: "극단적인 용량 제한 실험용입니다. 실제 서비스 기본값으로는 권장하지 않습니다.",
-    risk: "매우 높음",
     color: "text-pink-400",
   },
 ];
@@ -58,6 +44,9 @@ const QUANT_OPTIONS: {
 const QUANT_KEYS: QuantFormat[] = ["fp16", "int8", "int4", "int2"];
 
 export default function Export() {
+  const { t, i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const { quantState, onnxState, setQuantState, setOnnxState } = useJobStore();
   const [models,    setModels]    = useState<ModelMap | null>(null);
   const [configAcc, setConfigAcc] = useState<number | null>(null);
@@ -83,20 +72,74 @@ export default function Export() {
   }, [quantState, onnxState]);
 
   const selectedOpt = QUANT_OPTIONS.find((o) => o.value === format)!;
+  const quantMeta: Record<QuantFormat, { desc: string; useCase: string; risk: string }> = {
+    fp16: {
+      desc: tx("약 2× 압축", "About 2× smaller"),
+      useCase: tx("GPU/ONNX 배포 전 기본 권장 옵션. 정확도 손실이 거의 없습니다.", "Default recommended option before GPU/ONNX deployment with minimal accuracy loss."),
+      risk: tx("낮음", "Low"),
+    },
+    int8: {
+      desc: tx("약 4× 압축", "About 4× smaller"),
+      useCase: tx("모바일/CPU 추론처럼 용량과 속도가 중요할 때 실험용으로 적합합니다.", "Good for experiments where size and speed matter, such as mobile/CPU inference."),
+      risk: tx("중간", "Medium"),
+    },
+    int4: {
+      desc: tx("약 8× 압축", "About 8× smaller"),
+      useCase: tx("모델 크기를 크게 줄여야 할 때만 사용합니다. 결과 검증이 필요합니다.", "Use only when model size must be reduced significantly; result validation is required."),
+      risk: tx("높음", "High"),
+    },
+    int2: {
+      desc: tx("약 16× 압축", "About 16× smaller"),
+      useCase: tx("극단적인 용량 제한 실험용입니다. 실제 서비스 기본값으로는 권장하지 않습니다.", "For extreme size-constrained experiments; not recommended as a production default."),
+      risk: tx("매우 높음", "Very high"),
+    },
+  };
   const quantRunning = quantState === "running";
   const onnxRunning  = onnxState  === "running";
-
   // 비교 테이블: fp32 + 존재하는 양자화 + onnx
   const tableRows = (["fp32", ...QUANT_KEYS, "onnx"] as const).filter(
     (k) => models?.[k]?.exists
+  );
+  const packageReady = Boolean(
+    models &&
+    (models.fp32.exists || models.onnx.exists || QUANT_KEYS.some((key) => models[key]?.exists)) &&
+    models.class_map.exists &&
+    models.config.exists
   );
 
   return (
     <div className="p-6 space-y-6 max-w-4xl">
       <div>
-        <h1 className="text-xl font-bold text-white">Export</h1>
-        <p className="text-sm text-gray-400 mt-0.5">모델 양자화 및 배포 형식 변환</p>
+        <h1 className="text-xl font-bold text-white">{t("export.title")}</h1>
+        <p className="text-sm text-gray-400 mt-0.5">{t("export.subtitle")}</p>
       </div>
+
+      {models && (
+        <div className="card">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-gray-200">{t("export.package_title")}</p>
+              <p className="mt-0.5 text-xs leading-5 text-gray-500">{t("export.package_desc")}</p>
+              {!packageReady && (
+                <p className="mt-1 text-xs text-amber-400">{t("export.package_missing")}</p>
+              )}
+            </div>
+            {packageReady ? (
+              <a
+                href="/api/export/download-package"
+                download
+                className="btn-primary shrink-0 text-center text-sm"
+              >
+                {t("export.package_download")}
+              </a>
+            ) : (
+              <button type="button" disabled className="btn-ghost shrink-0 text-sm">
+                {t("export.package_download")}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── 카드 행 ── */}
       <div className="grid grid-cols-2 gap-4">
@@ -104,13 +147,13 @@ export default function Export() {
         {/* ── 양자화 카드 ── */}
         <div className="card space-y-4">
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-sm text-white">양자화</span>
+            <span className="font-semibold text-sm text-white">{t("export.quant_title")}</span>
             <StatusBadge state={quantState} />
           </div>
 
           {/* 드롭다운 */}
           <div>
-            <label className="label-text mb-1 block">형식 선택</label>
+            <label className="label-text mb-1 block">{t("export.format_label")}</label>
             <select
               value={format}
               onChange={(e) => setFormat(e.target.value as QuantFormat)}
@@ -119,7 +162,7 @@ export default function Export() {
             >
               {QUANT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
-                  {o.label} — {o.desc}
+                  {o.label} — {quantMeta[o.value].desc}
                 </option>
               ))}
             </select>
@@ -135,17 +178,17 @@ export default function Export() {
                     <div className="flex items-center gap-2">
                       <span className={`font-semibold ${o.color}`}>{o.label}</span>
                       {o.recommended && (
-                        <span className="rounded-full bg-green-500/15 px-1.5 py-0.5 text-[10px] text-green-300">권장</span>
+                        <span className="rounded-full bg-green-500/15 px-1.5 py-0.5 text-[10px] text-green-300">{tx("권장", "Recommended")}</span>
                       )}
                     </div>
                     <span>
                       {entry?.exists
                         ? <span className="text-green-400">{entry.size_mb} MB ✓</span>
-                        : <span className="text-gray-600">미변환</span>}
+                        : <span className="text-gray-600">{t("export.not_exists")}</span>}
                     </span>
                   </div>
-                  <p className="mt-1 text-[11px] leading-4 text-gray-400">{o.useCase}</p>
-                  <p className="mt-1 text-[10px] text-gray-500">정확도 손실 위험: {o.risk} · {o.desc}</p>
+                  <p className="mt-1 text-[11px] leading-4 text-gray-400">{quantMeta[o.value].useCase}</p>
+                  <p className="mt-1 text-[10px] text-gray-500">{tx("정확도 손실 위험", "Accuracy risk")}: {quantMeta[o.value].risk} · {quantMeta[o.value].desc}</p>
                 </div>
               );
             })}
@@ -158,11 +201,11 @@ export default function Export() {
               disabled={!models?.fp32.exists}
               className="btn-primary w-full text-sm"
             >
-              {selectedOpt.label} 변환 시작
+              {tx(`${selectedOpt.label} 변환 시작`, `Start ${selectedOpt.label} Conversion`)}
             </button>
           ) : (
             <button onClick={() => api.post("/export/quant/stop")} className="btn-danger w-full text-sm">
-              중단
+              {t("export.quant_stop_btn")}
             </button>
           )}
 
@@ -173,7 +216,7 @@ export default function Export() {
               download
               className="block text-center btn-ghost text-xs py-1"
             >
-              ⬇ {selectedOpt.label} 다운로드
+              {t("export.download_btn", { format: selectedOpt.label })}
             </a>
           )}
         </div>
@@ -181,25 +224,25 @@ export default function Export() {
         {/* ── ONNX 카드 ── */}
         <div className="card space-y-4">
           <div className="flex items-center justify-between">
-            <span className="font-semibold text-sm text-blue-300">ONNX (배포)</span>
+            <span className="font-semibold text-sm text-blue-300">{t("export.onnx_title")}</span>
             <StatusBadge state={onnxState} />
           </div>
 
           <div className="space-y-1 text-xs text-gray-400">
             <div className="flex justify-between">
-              <span>상태</span>
+              <span>{t("export.status")}</span>
               <span className={models?.onnx.exists ? "text-green-400" : "text-gray-600"}>
-                {models?.onnx.exists ? "✓ 존재" : "없음"}
+                {models?.onnx.exists ? t("export.exists") : t("export.not_exists")}
               </span>
             </div>
             <div className="flex justify-between">
-              <span>크기</span>
+              <span>{t("export.size")}</span>
               <span>{models?.onnx.size_mb != null ? `${models.onnx.size_mb} MB` : "—"}</span>
             </div>
           </div>
 
           <div>
-            <label className="label-text mb-1 block">Opset</label>
+            <label className="label-text mb-1 block">{t("export.opset_label")}</label>
             <input
               type="number" value={opset} min={11} max={20}
               onChange={(e) => setOpset(+e.target.value)}
@@ -214,37 +257,90 @@ export default function Export() {
               disabled={!models?.fp32.exists}
               className="btn-primary w-full text-sm"
             >
-              ONNX 변환 시작
+              {t("export.onnx_start_btn")}
             </button>
           ) : (
             <button onClick={() => api.post("/export/onnx/stop")} className="btn-danger w-full text-sm">
-              중단
+              {t("export.onnx_stop_btn")}
             </button>
           )}
 
           {models?.onnx.exists && (
-            <a
-              href={`/api/export/download/${models.onnx.filename}`}
-              download
-              className="block text-center btn-ghost text-xs py-1"
-            >
-              ⬇ ONNX 다운로드
-            </a>
+            <div className="space-y-2">
+              <a
+                href={`/api/export/download/${models.onnx.filename}`}
+                download
+                className="block text-center btn-ghost text-xs py-1"
+              >
+                {t("export.onnx_download")}
+              </a>
+              {models.onnx_data?.exists && (
+                <a
+                  href={`/api/export/download/${models.onnx_data.filename}`}
+                  download
+                  className="block text-center btn-ghost text-xs py-1"
+                >
+                  {tx("ONNX data 다운로드", "Download ONNX data")}
+                </a>
+              )}
+            </div>
           )}
         </div>
       </div>
 
+      {models && (
+        <div className="card">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-gray-200">{t("export.metadata_title")}</p>
+              <p className="mt-0.5 text-xs text-gray-500">{t("export.metadata_desc")}</p>
+            </div>
+          </div>
+          <div className="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {([
+              ["class_map", "class_map.json", tx("추론 라벨 매핑", "Inference label map")],
+              ["config", "config.json", tx("학습/백본 설정", "Training/backbone config")],
+              ["onnx_data", "best_model.onnx.data", tx("ONNX 외부 데이터", "ONNX external data")],
+            ] as const).map(([key, label, desc]) => {
+              const entry = models[key];
+              return (
+                <div key={key} className="rounded-lg bg-gray-950 border border-gray-800 p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="font-semibold text-xs text-gray-200 truncate">{label}</p>
+                      <p className="mt-1 text-[11px] text-gray-500">{desc}</p>
+                      <p className={`mt-2 text-[11px] ${entry?.exists ? "text-green-400" : "text-gray-600"}`}>
+                        {entry?.exists ? `${entry.size_mb} MB` : t("export.not_exists")}
+                      </p>
+                    </div>
+                    {entry?.exists && (
+                      <a
+                        href={`/api/export/download/${entry.filename}`}
+                        download
+                        className="btn-ghost shrink-0 text-xs py-1 px-2"
+                      >
+                        {t("export.metadata_download")}
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* ── 비교 테이블 ── */}
       {models && tableRows.length > 1 && (
         <div className="card">
-          <p className="text-sm font-medium text-gray-200 mb-3">모델 비교</p>
+          <p className="text-sm font-medium text-gray-200 mb-3">{t("export.compare_title")}</p>
           <table className="w-full text-xs text-gray-300">
             <thead>
               <tr className="text-gray-500 border-b border-gray-700">
-                <th className="text-left pb-2">형식</th>
-                <th className="text-right pb-2">크기</th>
-                <th className="text-right pb-2">압축률</th>
-                <th className="text-right pb-2">정확도</th>
+                <th className="text-left pb-2">{t("export.table_format")}</th>
+                <th className="text-right pb-2">{t("export.table_size")}</th>
+                <th className="text-right pb-2">{t("export.table_ratio")}</th>
+                <th className="text-right pb-2">{t("export.table_acc")}</th>
                 <th className="text-right pb-2"></th>
               </tr>
             </thead>
@@ -288,7 +384,7 @@ export default function Export() {
             </tbody>
           </table>
           {configAcc == null && (
-            <p className="mt-2 text-xs text-gray-600">정확도: 학습 완료 후 config.json에서 로드됩니다</p>
+            <p className="mt-2 text-xs text-gray-600">{t("export.acc_hint")}</p>
           )}
         </div>
       )}
@@ -296,15 +392,15 @@ export default function Export() {
       {/* ── 로그 ── */}
       <div className="card">
         <div className="flex gap-2 mb-2">
-          {(["quant", "onnx"] as const).map((t) => (
+          {(["quant", "onnx"] as const).map((tab) => (
             <button
-              key={t}
-              onClick={() => setLogTab(t)}
+              key={tab}
+              onClick={() => setLogTab(tab)}
               className={`text-xs px-3 py-1 rounded-md transition-colors ${
-                logTab === t ? "bg-brand-600 text-white" : "bg-gray-800 text-gray-400"
+                logTab === tab ? "bg-brand-600 text-white" : "bg-gray-800 text-gray-400"
               }`}
             >
-              {t === "quant" ? "양자화" : "ONNX"} 로그
+              {tab === "quant" ? t("export.log_tab_quant") : t("export.log_tab_onnx")}
             </button>
           ))}
         </div>

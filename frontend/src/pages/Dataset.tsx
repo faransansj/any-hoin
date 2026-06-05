@@ -27,16 +27,18 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatDuration(sec: number | null): string {
+function formatDuration(sec: number | null, isKo: boolean): string {
   if (sec == null) return "-";
-  if (sec < 60) return `${sec.toFixed(1)}초`;
+  if (sec < 60) return isKo ? `${sec.toFixed(1)}초` : `${sec.toFixed(1)}s`;
   const minutes = Math.floor(sec / 60);
   const seconds = Math.round(sec % 60);
-  return `${minutes}분 ${seconds}초`;
+  return isKo ? `${minutes}분 ${seconds}초` : `${minutes}m ${seconds}s`;
 }
 
 export default function Dataset() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const { crawlState, setCrawlState } = useJobStore();
   const [labels,       setLabels]       = useState<Label[]>([]);
   const [activeLabel,  setActiveLabel]  = useState<string | null>(null);
@@ -303,7 +305,7 @@ export default function Dataset() {
 
   async function deleteSelected() {
     if (selected.size === 0) return;
-    if (!confirm(`${selected.size}장을 삭제하시겠습니까?`)) return;
+    if (!confirm(tx(`${selected.size}장을 삭제하시겠습니까?`, `Delete ${selected.size} images?`))) return;
     await api.delete("/images", { image_ids: Array.from(selected) });
     await loadLabels();
     await loadImages(activeLabel!, page);
@@ -311,8 +313,13 @@ export default function Dataset() {
 
   async function runPreprocess() {
     if (preprocessScope === "active" && !preprocessLabel) return;
-    const target = preprocessLabel ? `"${preprocessLabel}" 라벨` : "전체 데이터셋";
-    if (!confirm(`${target}의 ${thresholdMb}MB 이상 이미지를 최대 ${maxSide}px로 줄입니다. 원본 파일이 교체됩니다. 계속할까요?`)) return;
+    const target = preprocessLabel
+      ? tx(`"${preprocessLabel}" 라벨`, `label "${preprocessLabel}"`)
+      : tx("전체 데이터셋", "entire dataset");
+    if (!confirm(tx(
+      `${target}의 ${thresholdMb}MB 이상 이미지를 최대 ${maxSide}px로 줄입니다. 원본 파일이 교체됩니다. 계속할까요?`,
+      `Resize images over ${thresholdMb}MB in ${target} to max ${maxSide}px? Original files will be replaced. Continue?`
+    ))) return;
 
     setPreprocessing(true);
     try {
@@ -367,17 +374,17 @@ export default function Dataset() {
                 value={labelSearch}
                 onChange={(e) => setLabelSearch(e.target.value)}
                 className="input text-xs py-1"
-                placeholder="라벨 검색..."
+                placeholder={tx("라벨 검색...", "Search labels...")}
               />
               <select
                 value={labelSort}
                 onChange={(e) => setLabelSort(e.target.value as typeof labelSort)}
                 className="input text-xs py-1"
               >
-                <option value="name_asc">이름 오름차순</option>
-                <option value="name_desc">이름 내림차순</option>
-                <option value="count_desc">이미지 많은 순</option>
-                <option value="count_asc">이미지 적은 순</option>
+                <option value="name_asc">{tx("이름 오름차순", "Name (A→Z)")}</option>
+                <option value="name_desc">{tx("이름 내림차순", "Name (Z→A)")}</option>
+                <option value="count_desc">{tx("이미지 많은 순", "Image Count (High→Low)")}</option>
+                <option value="count_asc">{tx("이미지 적은 순", "Image Count (Low→High)")}</option>
               </select>
               <label className="flex items-center gap-2 text-[11px] text-gray-500">
                 <input
@@ -386,14 +393,14 @@ export default function Dataset() {
                   onChange={(e) => setLowOnly(e.target.checked)}
                   className="accent-brand-500"
                 />
-                부족 라벨만 보기
+                {tx("부족 라벨만 보기", "Show only low labels")}
               </label>
             </div>
 	        </div>
 
 	        <div className="flex-1 overflow-y-auto py-2">
 	          {filteredLabels.length === 0 && (
-	            <p className="px-3 py-6 text-xs text-gray-500">조건에 맞는 라벨이 없습니다.</p>
+	            <p className="px-3 py-6 text-xs text-gray-500">{tx("조건에 맞는 라벨이 없습니다.", "No labels match the current filters.")}</p>
 	          )}
 	          {filteredLabels.map((l) => (
 	            <div
@@ -439,11 +446,11 @@ export default function Dataset() {
                       <option key={l.name} value={l.name}>{l.name}</option>
                     ))}
                   </select>
-                    <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">{t("common.move") || "이동"}</button>
+                    <button onClick={moveSelected} disabled={!moveTarget} className="btn-ghost text-xs py-1">{t("common.move")}</button>
                     <button onClick={deleteSelected} className="btn-danger text-xs py-1">{t("common.delete")}</button>
-                    <button onClick={clearSelection} className="btn-ghost text-xs py-1">해제</button>
-	                </>
-	              )}
+                    <button onClick={clearSelection} className="btn-ghost text-xs py-1">{tx("해제", "Clear")}</button>
+		                </>
+		              )}
 
 	              <div className="ml-auto flex items-center gap-2">
                   <select
@@ -452,13 +459,13 @@ export default function Dataset() {
                     className="input text-xs py-1 w-32"
                     disabled={!activeLabel}
                   >
-                    <option value="name_asc">이름순</option>
-                    <option value="name_desc">이름 역순</option>
-                    <option value="newest">최신순</option>
-                    <option value="oldest">오래된순</option>
+                    <option value="name_asc">{tx("이름순", "Name (A→Z)")}</option>
+                    <option value="name_desc">{tx("이름 역순", "Name (Z→A)")}</option>
+                    <option value="newest">{tx("최신순", "Newest")}</option>
+                    <option value="oldest">{tx("오래된순", "Oldest")}</option>
                   </select>
 	                <button onClick={selectAll} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">{t("dataset.select_all")}</button>
-                  <button onClick={invertSelection} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">반전</button>
+                  <button onClick={invertSelection} className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">{tx("반전", "Invert")}</button>
 	                <label className="btn-ghost text-xs py-1 cursor-pointer">
                   {t("dataset.upload_btn")}
                   <input type="file" multiple accept="image/*" className="hidden"
@@ -471,10 +478,16 @@ export default function Dataset() {
               <div className="mx-4 mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 flex items-start justify-between gap-3 shrink-0">
                 <div>
                   <p className="text-xs font-semibold text-amber-300">
-                    기존 이미지 폴더 {discovery.missing.length}개가 characters.json에 등록되어 있지 않습니다.
+                    {tx(
+                      `기존 이미지 폴더 ${discovery.missing.length}개가 characters.json에 등록되어 있지 않습니다.`,
+                      `${discovery.missing.length} existing image folders are not registered in characters.json.`
+                    )}
                   </p>
                   <p className="text-[11px] text-amber-100/70 mt-1">
-                    세션 종료로 이미지가 삭제된 것은 아닙니다. 필요하면 현재 dataset/raw 폴더를 다시 캐릭터 목록에 등록하세요.
+                    {tx(
+                      "세션 종료로 이미지가 삭제된 것은 아닙니다. 필요하면 현재 dataset/raw 폴더를 다시 캐릭터 목록에 등록하세요.",
+                      "Images were not deleted when the session ended. Re-register current dataset/raw folders to the character list if needed."
+                    )}
                   </p>
                 </div>
                 <button
@@ -482,7 +495,7 @@ export default function Dataset() {
                   disabled={recovering}
                   className="shrink-0 text-xs px-3 py-1.5 rounded bg-amber-500 text-gray-950 hover:bg-amber-400 disabled:opacity-50"
                 >
-                  {recovering ? "불러오는 중" : "데이터셋 불러오기"}
+                  {recovering ? tx("불러오는 중", "Loading...") : tx("데이터셋 불러오기", "Load Dataset")}
                 </button>
               </div>
             )}
@@ -490,33 +503,36 @@ export default function Dataset() {
             <div className="mx-4 mt-3 border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-3 shrink-0">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">이미지 전처리</p>
+                  <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">{tx("이미지 전처리", "Image Preprocessing")}</p>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                    용량이 큰 이미지를 감지하면 학습 전 긴 변 해상도를 낮춰 디코딩 병목을 줄이는 것을 권장합니다.
+                    {tx(
+                      "용량이 큰 이미지를 감지하면 학습 전 긴 변 해상도를 낮춰 디코딩 병목을 줄이는 것을 권장합니다.",
+                      "If large images are detected, reducing max side length before training is recommended to reduce decode bottlenecks."
+                    )}
                   </p>
                 </div>
                 {largeScan && largeScan.large_count > 0 && (
                   <div className="text-right text-xs text-amber-300">
-                    <p className="font-semibold">대용량 이미지 {largeScan.large_count.toLocaleString()}장 감지</p>
-                    <p>{formatBytes(largeScan.large_bytes)} 전처리 권장</p>
+                    <p className="font-semibold">{tx(`대용량 이미지 ${largeScan.large_count.toLocaleString()}장 감지`, `Detected ${largeScan.large_count.toLocaleString()} large images`)}</p>
+                    <p>{tx(`${formatBytes(largeScan.large_bytes)} 전처리 권장`, `${formatBytes(largeScan.large_bytes)} recommended for preprocessing`)}</p>
                   </div>
                 )}
               </div>
 
               <div className="mt-3 grid grid-cols-2 lg:grid-cols-5 gap-2 items-end">
                 <label className="space-y-1">
-                  <span className="label-text">범위</span>
+                  <span className="label-text">{tx("범위", "Scope")}</span>
                   <select
                     value={preprocessScope}
                     onChange={(e) => setPreprocessScope(e.target.value as "all" | "active")}
                     className="input text-xs py-1"
                   >
-                    <option value="all">전체 데이터셋</option>
-                    <option value="active">현재 라벨</option>
+                    <option value="all">{tx("전체 데이터셋", "Entire Dataset")}</option>
+                    <option value="active">{tx("현재 라벨", "Current Label")}</option>
                   </select>
                 </label>
                 <label className="space-y-1">
-                  <span className="label-text">탐지 기준(MB)</span>
+                  <span className="label-text">{tx("탐지 기준(MB)", "Threshold (MB)")}</span>
                   <input
                     type="number"
                     min={1}
@@ -527,7 +543,7 @@ export default function Dataset() {
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="label-text">최대 긴 변(px)</span>
+                  <span className="label-text">{tx("최대 긴 변(px)", "Max Long Side (px)")}</span>
                   <input
                     type="number"
                     min={512}
@@ -539,7 +555,7 @@ export default function Dataset() {
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="label-text">JPEG/WebP 품질</span>
+                  <span className="label-text">{tx("JPEG/WebP 품질", "JPEG/WebP Quality")}</span>
                   <input
                     type="number"
                     min={50}
@@ -555,14 +571,14 @@ export default function Dataset() {
                     disabled={scanningLarge || preprocessRunning || (preprocessScope === "active" && !activeLabel)}
                     className="btn-ghost text-xs py-1 flex-1"
                   >
-                    {scanningLarge ? "스캔 중" : "스캔"}
+                    {scanningLarge ? tx("스캔 중", "Scanning...") : tx("스캔", "Scan")}
                   </button>
                   <button
                     onClick={runPreprocess}
                     disabled={preprocessing || preprocessRunning || !largeScan || largeScan.large_count === 0 || (preprocessScope === "active" && !activeLabel)}
                     className="btn-primary text-xs py-1 flex-1 disabled:opacity-50"
                   >
-                    {preprocessRunning ? `${preprocessStatus?.pct ?? 0}%` : preprocessing ? "시작 중" : "전처리"}
+                    {preprocessRunning ? `${preprocessStatus?.pct ?? 0}%` : preprocessing ? tx("시작 중", "Starting...") : tx("전처리", "Preprocess")}
                   </button>
                 </div>
               </div>
@@ -578,13 +594,13 @@ export default function Dataset() {
                           : "text-brand-300"
                     }`}>
                       {preprocessStatus.state === "running"
-                        ? "전처리 진행 중"
+                        ? tx("전처리 진행 중", "Preprocessing")
                         : preprocessStatus.state === "done"
-                          ? "전처리 완료"
-                          : "전처리 실패"}
+                          ? tx("전처리 완료", "Completed")
+                          : tx("전처리 실패", "Failed")}
                     </span>
                     <span className="text-gray-500 dark:text-gray-400">
-                      {preprocessStatus.current.toLocaleString()} / {preprocessStatus.total.toLocaleString()}장 · {preprocessStatus.pct.toFixed(1)}%
+                      {preprocessStatus.current.toLocaleString()} / {preprocessStatus.total.toLocaleString()}{tx("장", "")} · {preprocessStatus.pct.toFixed(1)}%
                     </span>
                   </div>
 
@@ -598,15 +614,15 @@ export default function Dataset() {
                   </div>
 
                   <div className="mt-2 grid grid-cols-2 lg:grid-cols-4 gap-2 text-[11px] text-gray-500 dark:text-gray-400">
-                    <span>처리 {preprocessStatus.processed.toLocaleString()}장</span>
-                    <span>스킵 {preprocessStatus.skipped.toLocaleString()}장</span>
-                    <span>절감 {formatBytes(preprocessStatus.saved_bytes)}</span>
-                    <span>경과 {formatDuration(preprocessStatus.elapsed_sec)}</span>
+                    <span>{tx("처리", "Processed")} {preprocessStatus.processed.toLocaleString()}{tx("장", "")}</span>
+                    <span>{tx("스킵", "Skipped")} {preprocessStatus.skipped.toLocaleString()}{tx("장", "")}</span>
+                    <span>{tx("절감", "Saved")} {formatBytes(preprocessStatus.saved_bytes)}</span>
+                    <span>{tx("경과", "Elapsed")} {formatDuration(preprocessStatus.elapsed_sec, isKo)}</span>
                   </div>
 
                   {preprocessStatus.current_image && preprocessStatus.state === "running" && (
                     <p className="mt-2 truncate text-[11px] text-gray-500 dark:text-gray-400">
-                      현재 파일: {preprocessStatus.current_image}
+                      {tx("현재 파일", "Current file")}: {preprocessStatus.current_image}
                     </p>
                   )}
 
@@ -621,15 +637,26 @@ export default function Dataset() {
               {largeScan && (
                 <div className={`mt-3 text-xs ${largeScan.large_count > 0 ? "text-amber-200" : "text-gray-500 dark:text-gray-400"}`}>
                   {largeScan.large_count > 0
-                    ? `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.large_count.toLocaleString()}장이 ${largeScan.threshold_mb}MB 이상입니다. 가장 큰 파일: ${largeScan.largest[0]?.label}/${largeScan.largest[0]?.name} (${largeScan.largest[0]?.size_mb}MB)`
-                    : `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.threshold_mb}MB 이상 이미지는 없습니다.`}
+                    ? tx(
+                      `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.large_count.toLocaleString()}장이 ${largeScan.threshold_mb}MB 이상입니다. 가장 큰 파일: ${largeScan.largest[0]?.label}/${largeScan.largest[0]?.name} (${largeScan.largest[0]?.size_mb}MB)`,
+                      `${largeScan.large_count.toLocaleString()} of ${largeScan.total_count.toLocaleString()} images are over ${largeScan.threshold_mb}MB. Largest: ${largeScan.largest[0]?.label}/${largeScan.largest[0]?.name} (${largeScan.largest[0]?.size_mb}MB)`
+                    )
+                    : tx(
+                      `${largeScan.total_count.toLocaleString()}장 중 ${largeScan.threshold_mb}MB 이상 이미지는 없습니다.`,
+                      `No images over ${largeScan.threshold_mb}MB among ${largeScan.total_count.toLocaleString()} images.`
+                    )}
                 </div>
               )}
 
               {preprocessResult && (
                 <div className="mt-2 text-xs text-green-300">
-                  {preprocessResult.processed.toLocaleString()}장 처리 완료, {formatBytes(preprocessResult.saved_bytes)} 절감
-                  {preprocessResult.skipped > 0 ? `, ${preprocessResult.skipped.toLocaleString()}장 스킵` : ""}
+                  {tx(
+                    `${preprocessResult.processed.toLocaleString()}장 처리 완료, ${formatBytes(preprocessResult.saved_bytes)} 절감`,
+                    `Processed ${preprocessResult.processed.toLocaleString()} images, saved ${formatBytes(preprocessResult.saved_bytes)}`
+                  )}
+                  {preprocessResult.skipped > 0
+                    ? tx(`, ${preprocessResult.skipped.toLocaleString()}장 스킵`, `, ${preprocessResult.skipped.toLocaleString()} skipped`)
+                    : ""}
                 </div>
               )}
             </div>
@@ -677,7 +704,7 @@ export default function Dataset() {
                     <button
                       onClick={(e) => { e.stopPropagation(); setPreviewImg(img); }}
                       className="absolute top-1 right-1 p-1 rounded bg-black/60 text-white opacity-0 group-hover:opacity-100 transition-opacity hover:bg-black/80"
-                      title="전체보기"
+                      title={tx("전체보기", "View full image")}
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />

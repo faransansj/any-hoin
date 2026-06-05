@@ -3,7 +3,8 @@
  * - 이미지 드롭존
  * - Top-5 예측 바 차트
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import { useDropzone } from "react-dropzone";
 import { api } from "../api";
 import { useTranslation } from "react-i18next";
@@ -32,11 +33,54 @@ export default function Inference() {
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState<string | null>(null);
   const [modelInfo, setModelInfo] = useState<InferenceModelInfo | null>(null);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshModelInfo = useCallback(async () => {
+    const info = await api.get<InferenceModelInfo>("/inference/model-info");
+    setModelInfo(info);
+  }, []);
 
   useEffect(() => {
-    api.get<InferenceModelInfo>("/inference/model-info")
-      .then(setModelInfo)
-      .catch(console.error);
+    refreshModelInfo().catch(console.error);
+  }, [refreshModelInfo]);
+
+  const handleModelFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0) return;
+
+    setModelError(null);
+    setError(null);
+    setModelLoading(true);
+    setResult(null);
+
+    try {
+      const form = new FormData();
+      files.forEach((file) => form.append("files", file));
+      const info = await api.upload<InferenceModelInfo>("/inference/model", form);
+      setModelInfo(info);
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setModelLoading(false);
+    }
+  }, []);
+
+  const clearSelectedModel = useCallback(async () => {
+    setModelError(null);
+    setModelLoading(true);
+    setResult(null);
+
+    try {
+      const info = await api.delete<InferenceModelInfo>("/inference/model");
+      setModelInfo(info);
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setModelLoading(false);
+    }
   }, []);
 
   const onDrop = useCallback(async (files: File[]) => {
@@ -99,13 +143,55 @@ export default function Inference() {
             <p className="text-sm font-semibold text-gray-200">{t("inference.model_info_title")}</p>
             <p className="text-xs text-gray-500 mt-0.5">{t("inference.model_info_desc")}</p>
           </div>
-          <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
-            modelInfo?.model_ready ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
-          }`}>
-            {modelInfo?.model_ready ? t("inference.model_ready") : t("inference.model_missing")}
-          </span>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <input
+              ref={modelInputRef}
+              type="file"
+              accept=".pth,.pt,.onnx,.data,.json"
+              multiple
+              className="hidden"
+              onChange={handleModelFile}
+            />
+            <button
+              type="button"
+              className="btn-ghost text-xs"
+              disabled={modelLoading}
+              onClick={() => modelInputRef.current?.click()}
+            >
+              {modelLoading ? t("inference.model_loading") : t("inference.model_browse")}
+            </button>
+            {modelInfo?.custom_model_selected && (
+              <button
+                type="button"
+                className="btn-ghost text-xs"
+                disabled={modelLoading}
+                onClick={clearSelectedModel}
+              >
+                {t("inference.model_use_default")}
+              </button>
+            )}
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+              modelInfo?.model_ready ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"
+            }`}>
+              {modelInfo?.model_ready ? t("inference.model_ready") : t("inference.model_missing")}
+            </span>
+          </div>
         </div>
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+        {modelError && (
+          <div className="mt-3 rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs text-red-400">
+            {modelError}
+          </div>
+        )}
+        <div className="mt-4 grid grid-cols-2 md:grid-cols-6 gap-3 text-xs">
+          <div className="rounded-lg bg-gray-950 border border-gray-800 p-3 col-span-2">
+            <p className="text-gray-500">{t("inference.active_model")}</p>
+            <p className="mt-1 font-semibold text-gray-100 truncate" title={modelInfo?.active_model ?? undefined}>
+              {modelInfo?.active_model ?? "—"}
+            </p>
+            {typeof modelInfo?.active_model_size_mb === "number" && (
+              <p className="mt-1 text-[11px] text-gray-500 tabular-nums">{modelInfo.active_model_size_mb} MB</p>
+            )}
+          </div>
           <div className="rounded-lg bg-gray-950 border border-gray-800 p-3">
             <p className="text-gray-500">Backend</p>
             <p className="mt-1 font-semibold text-gray-100">{modelInfo?.loaded_backend ?? modelInfo?.preferred_backend ?? "—"}</p>

@@ -13,11 +13,23 @@ from contextlib import contextmanager
 import sys
 import warnings
 
-# triton-xpu 패키지는 triton.language 등 표준 API를 구현하지 않아
-# torch._dynamo / IPEX import 시 AttributeError 를 일으킨다.
-# None 으로 선점해 triton-free 경로를 강제한다.
-# sys.modules 에 이미 있으면 setdefault 는 아무 일도 하지 않는다.
-sys.modules.setdefault("triton", None)  # type: ignore[arg-type]
+def _package_exists(name: str) -> bool:
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            version(name)
+            return True
+        except PackageNotFoundError:
+            return False
+    except Exception:
+        return False
+
+
+# triton-xpu 패키지는 일부 환경에서 표준 triton.language API와 맞지 않아
+# torch._dynamo / IPEX import 시 AttributeError 를 일으킨다. CUDA 환경은 표준
+# triton을 쓸 수 있으므로 XPU 전용 triton만 있는 경우에만 마스킹한다.
+if _package_exists("triton-xpu") and not _package_exists("triton"):
+    sys.modules.setdefault("triton", None)  # type: ignore[arg-type]
 
 # ──────────────────────────────────────────────────────────────────
 # IPEX lazy-load (캐시)
@@ -104,6 +116,31 @@ def is_xpu_build() -> bool:
     return "+xpu" in torch_version()
 
 
+def backend_profile() -> str:
+    """현재 설치된 PyTorch wheel 계열."""
+    version = torch_version()
+    if "+xpu" in version:
+        return "arc"
+    if "+cu" in version:
+        return "cuda"
+    if "+rocm" in version:
+        return "rocm"
+    if version:
+        return "cpu"
+    return "unknown"
+
+
+def sync_command_for_device(device_type: str) -> str:
+    """선택 디바이스에 맞는 uv sync 명령."""
+    if device_type == "xpu":
+        return "uv sync --extra arc"
+    if device_type == "cuda":
+        return "uv sync --extra cuda"
+    if device_type == "cpu":
+        return "uv sync"
+    return "uv sync"
+
+
 def xpu_available() -> bool:
     """XPU 빌드이고 하드웨어가 실제로 존재하는지 안전하게 확인."""
     try:
@@ -124,6 +161,30 @@ def cuda_available() -> bool:
         return bool(torch.cuda.is_available())
     except Exception:
         return False
+
+
+def cuda_unavailable_message(option: str) -> str:
+    """CLI/UI에서 공통으로 쓰는 CUDA 사용 불가 사유."""
+    version = torch_version() or "unknown"
+    if "+xpu" in version:
+        return (
+            f"{option} 를 지정했지만 현재 PyTorch는 XPU 빌드입니다.\n"
+            f"  - installed torch: {version}\n"
+            "  - CUDA 학습에는 CUDA PyTorch 빌드가 필요합니다.\n"
+            "  - NVIDIA GPU를 사용하려면: uv sync --extra cuda"
+        )
+    if "+cu" not in version:
+        return (
+            f"{option} 를 지정했지만 현재 PyTorch는 CUDA 빌드가 아닙니다.\n"
+            f"  - installed torch: {version}\n"
+            "  - NVIDIA GPU를 사용하려면: uv sync --extra cuda"
+        )
+    return (
+        f"{option} 를 지정했지만 torch.cuda.is_available() == False 입니다.\n"
+        "  1) NVIDIA GPU/드라이버 확인\n"
+        "  2) 현재 환경에 CUDA PyTorch 빌드가 설치됐는지 확인\n"
+        "  3) NVIDIA GPU가 없다면 device를 auto/cpu로 선택하세요."
+    )
 
 
 def mps_available() -> bool:
@@ -190,11 +251,7 @@ def require_device_available(device, option: str) -> None:
     if dev_type == "xpu" and not xpu_available():
         raise RuntimeError(xpu_unavailable_message(option))
     if dev_type == "cuda" and not cuda_available():
-        raise RuntimeError(
-            f"{option} 를 지정했지만 CUDA를 사용할 수 없습니다.\n"
-            f"  - installed torch: {torch_version() or 'unknown'}\n"
-            "  - NVIDIA GPU/드라이버/CUDA PyTorch 빌드를 확인하거나 auto/cpu를 선택하세요."
-        )
+        raise RuntimeError(cuda_unavailable_message(option))
     if dev_type == "mps" and not mps_available():
         raise RuntimeError(
             f"{option} 를 지정했지만 Apple MPS를 사용할 수 없습니다. auto/cpu를 선택하세요."

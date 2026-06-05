@@ -3,9 +3,10 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, HTTPException, WebSocket
 
 import xpu_compat
+from scripts.sync_backend import detect_backend, sync_command
 from studio.jobs.train_job import TrainJob
 
 PROJECT_ROOT = "."
@@ -29,35 +30,69 @@ def _device_status() -> dict:
     cuda_available = xpu_compat.cuda_available()
     mps_available = xpu_compat.mps_available()
     xpu = xpu_compat.xpu_status()
+    active_backend = xpu_compat.backend_profile()
+    recommended_backend = detect_backend()
+    recommended_sync = " ".join(sync_command(recommended_backend))
 
     devices = [
-        {"key": "auto", "label": "auto", "available": True, "reason": None},
+        {
+            "key": "auto",
+            "label": "auto",
+            "available": True,
+            "reason": None,
+            "sync_command": recommended_sync,
+        },
         {
             "key": "cuda",
             "label": "CUDA",
             "available": cuda_available,
-            "reason": None if cuda_available else "CUDA를 사용할 수 없습니다.",
+            "reason": None if cuda_available else xpu_compat.cuda_unavailable_message("device=cuda"),
+            "sync_command": xpu_compat.sync_command_for_device("cuda"),
         },
         {
             "key": "mps",
             "label": "MPS (Apple)",
             "available": mps_available,
             "reason": None if mps_available else "Apple MPS를 사용할 수 없습니다.",
+            "sync_command": "uv sync",
         },
         {
             "key": "xpu",
             "label": "XPU (Intel Arc)",
             "available": xpu["available"],
             "reason": xpu["reason"],
+            "sync_command": xpu_compat.sync_command_for_device("xpu"),
         },
-        {"key": "cpu", "label": "CPU", "available": True, "reason": None},
+        {
+            "key": "cpu",
+            "label": "CPU",
+            "available": True,
+            "reason": None,
+            "sync_command": xpu_compat.sync_command_for_device("cpu"),
+        },
     ]
 
     return {
         "torch_version": torch_version,
         "ipex_version": xpu_compat.ipex_version(),
+        "active_backend": active_backend,
+        "recommended_backend": recommended_backend,
+        "recommended_sync_command": recommended_sync,
         "devices": devices,
     }
+
+
+def _validate_training_device(body: dict) -> None:
+    device = str(body.get("device") or "auto").strip().lower()
+    if not device or device == "auto":
+        return
+    if device in {"cpu", "mps"} or device.startswith(("cuda", "xpu")):
+        try:
+            xpu_compat.require_device_available(device, f"device={device}")
+        except RuntimeError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return
+    raise HTTPException(400, f"Unknown training device: {device}")
 
 
 def _artifact_entry(filename: str) -> dict:
@@ -114,6 +149,7 @@ def get_artifacts():
 
 @router.post("/start")
 async def start_training(body: dict):
+    _validate_training_device(body)
     await _job.start(body, PROJECT_ROOT)
     return {"started": True}
 

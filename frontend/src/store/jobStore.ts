@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { JobState, TrainMetric, TrainProgress } from "../types";
+import type { JobState, TrainBottleneck, TrainMetric, TrainProgress } from "../types";
 
 interface JobStore {
   crawlState:    JobState;
@@ -9,6 +9,7 @@ interface JobStore {
   trainMetrics:  TrainMetric[];
   bestValAcc:    number;
   trainProgress: TrainProgress | null;
+  trainBottleneck: TrainBottleneck | null;
 
   setCrawlState:    (s: JobState) => void;
   setTrainState:    (s: JobState) => void;
@@ -18,6 +19,7 @@ interface JobStore {
   setMetrics:       (metrics: TrainMetric[]) => void;
   resetMetrics:     () => void;
   setTrainProgress: (p: TrainProgress | null) => void;
+  setTrainBottleneck: (b: TrainBottleneck | null) => void;
 }
 
 function metricKey(m: TrainMetric): string {
@@ -36,6 +38,7 @@ export const useJobStore = create<JobStore>((set) => ({
   trainMetrics:  [],
   bestValAcc:    0,
   trainProgress: null,
+  trainBottleneck: null,
 
   setCrawlState:    (s) => set({ crawlState: s }),
   setTrainState:    (s) => set({ trainState: s }),
@@ -53,6 +56,7 @@ export const useJobStore = create<JobStore>((set) => ({
     trainMetrics: metrics,
     bestValAcc: bestAcc(metrics),
   }),
-  resetMetrics:     () => set({ trainMetrics: [], bestValAcc: 0, trainProgress: null }),
+  resetMetrics:     () => set({ trainMetrics: [], bestValAcc: 0, trainProgress: null, trainBottleneck: null }),
   setTrainProgress: (p) => set({ trainProgress: p }),
+  setTrainBottleneck: (b) => set({ trainBottleneck: b }),
 }));

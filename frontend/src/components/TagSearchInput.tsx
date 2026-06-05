@@ -6,6 +6,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
+import { useTranslation } from "react-i18next";
 
 interface TagSuggestion {
   name: string;
@@ -28,6 +29,9 @@ interface Props {
 export default function TagSearchInput({
   value, onChange, onPostCount, onSelect, placeholder, disabled, className,
 }: Props) {
+  const { i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const [suggestions, setSuggestions] = useState<TagSuggestion[]>([]);
   const [loading,     setLoading]     = useState(false);
   const [open,        setOpen]        = useState(false);
@@ -84,7 +88,7 @@ export default function TagSearchInput({
         if (requestId !== requestRef.current) return;
         setSuggestions([]);
         setSearched(true);
-        setError(e?.message ?? "검색 실패");
+        setError(e?.message ?? tx("검색 실패", "Search failed"));
         setOpen(true);
       } finally {
         if (requestId === requestRef.current) setLoading(false);
@@ -140,7 +144,7 @@ export default function TagSearchInput({
         />
         {loading && (
           <span className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 text-[10px] animate-pulse">
-            검색중
+            {tx("검색중", "Searching")}
           </span>
         )}
       </div>
@@ -152,12 +156,12 @@ export default function TagSearchInput({
         >
           {error && (
             <li className="px-3 py-2 text-red-300 bg-red-950/40">
-              Danbooru 태그 검색 실패: {error}
+              {tx("Danbooru 태그 검색 실패", "Failed to search Danbooru tags")}: {error}
             </li>
           )}
           {!error && searched && suggestions.length === 0 && (
             <li className="px-3 py-2 text-gray-500">
-              검색 결과 없음
+              {tx("검색 결과 없음", "No results found")}
             </li>
           )}
           {suggestions.map((s, i) => (
@@ -178,7 +182,7 @@ export default function TagSearchInput({
                 )}
               </span>
               <span className="ml-3 shrink-0 text-gray-500">
-                {s.post_count.toLocaleString()}장
+                {tx(`${s.post_count.toLocaleString()}장`, `${s.post_count.toLocaleString()} images`)}
               </span>
             </li>
           ))}

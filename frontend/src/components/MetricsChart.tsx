@@ -14,6 +14,7 @@ import {
   YAxis,
 } from "recharts";
 import type { TrainMetric, TrainProgress } from "../types";
+import { useTranslation } from "react-i18next";
 
 interface Props {
   metrics:       TrainMetric[];
@@ -24,11 +25,17 @@ interface Props {
 
 const fmt2 = (v: number) => v.toFixed(4);
 
-function LiveProgressChart({ progress }: { progress: TrainProgress | null }) {
+function LiveProgressChart({
+  progress,
+  tx,
+}: {
+  progress: TrainProgress | null;
+  tx: (ko: string, en: string) => string;
+}) {
   if (!progress) {
     return (
       <div className="flex items-center justify-center h-52 text-gray-600 text-sm">
-        첫 batch 진행률을 기다리는 중입니다
+        {tx("첫 batch 진행률을 기다리는 중입니다", "Waiting for first batch progress")}
       </div>
     );
   }
@@ -78,18 +85,25 @@ function LiveProgressChart({ progress }: { progress: TrainProgress | null }) {
       </div>
 
       <p className="text-[11px] text-gray-500">
-        Loss/Accuracy 라인 차트는 epoch가 끝나 metric이 확정되면 자동으로 표시됩니다.
+        {tx(
+          "Loss/Accuracy 라인 차트는 epoch가 끝나 metric이 확정되면 자동으로 표시됩니다.",
+          "Loss/Accuracy line charts appear automatically once each epoch metric is finalized."
+        )}
       </p>
     </div>
   );
 }
 
 export default function MetricsChart({ metrics, phase1Epochs, progress, running }: Props) {
+  const { i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
+
   if (metrics.length === 0) {
-    if (running) return <LiveProgressChart progress={progress ?? null} />;
+    if (running) return <LiveProgressChart progress={progress ?? null} tx={tx} />;
     return (
       <div className="flex items-center justify-center h-52 text-gray-600 text-sm">
-        학습 시작 후 첫 epoch가 끝나면 차트가 표시됩니다
+        {tx("학습 시작 후 첫 epoch가 끝나면 차트가 표시됩니다", "Chart appears after the first epoch completes")}
       </div>
     );
   }

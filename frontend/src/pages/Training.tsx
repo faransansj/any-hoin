@@ -75,19 +75,21 @@ async function requestTrainingNotifications(): Promise<NotificationStatus> {
 // ── 컴포넌트 ─────────────────────────────────────────────
 
 const DEFAULT_DEVICE_OPTIONS: DeviceOption[] = [
-  { key: "auto", label: "auto", available: true, reason: null },
-  { key: "cuda", label: "CUDA", available: true, reason: null },
-  { key: "mps", label: "MPS (Apple)", available: true, reason: null },
-  { key: "xpu", label: "XPU (Intel Arc)", available: true, reason: null },
-  { key: "cpu", label: "CPU", available: true, reason: null },
+  { key: "auto", label: "auto", available: true, reason: null, sync_command: null },
+  { key: "cuda", label: "CUDA", available: true, reason: null, sync_command: "uv sync --extra cuda" },
+  { key: "mps", label: "MPS (Apple)", available: true, reason: null, sync_command: "uv sync" },
+  { key: "xpu", label: "XPU (Intel Arc)", available: true, reason: null, sync_command: "uv sync --extra arc" },
+  { key: "cpu", label: "CPU", available: true, reason: null, sync_command: "uv sync" },
 ];
 
 export default function Training() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const {
     trainState, setTrainState,
     trainMetrics, bestValAcc, pushMetric, setMetrics, resetMetrics,
-    trainProgress, setTrainProgress,
+    trainProgress, trainBottleneck, setTrainProgress,
   } = useJobStore();
 
   const [batchSize,       setBatchSize]       = useState(32);
@@ -97,6 +99,11 @@ export default function Training() {
   const [patience,        setPatience]        = useState(7);
   const [device,          setDevice]          = useState("auto");
   const [deviceOptions,   setDeviceOptions]   = useState<DeviceOption[]>(DEFAULT_DEVICE_OPTIONS);
+  const [torchVersion,    setTorchVersion]    = useState("unknown");
+  const [activeBackend,   setActiveBackend]   = useState("unknown");
+  const [recommendedBackend, setRecommendedBackend] = useState("auto");
+  const [recommendedSync, setRecommendedSync] = useState("uv sync");
+  const [trainingError,   setTrainingError]   = useState<string | null>(null);
   const [backbone,        setBackbone]        = useState(
     () => localStorage.getItem("training.backbone") ?? "swin_tiny_patch4_window7_224"
   );
@@ -160,6 +167,10 @@ export default function Training() {
     api.get<TrainingDevicesResponse>("/training/devices")
       .then((r) => {
         setDeviceOptions(r.devices);
+        setTorchVersion(r.torch_version);
+        setActiveBackend(r.active_backend ?? "unknown");
+        setRecommendedBackend(r.recommended_backend ?? "auto");
+        setRecommendedSync(r.recommended_sync_command ?? "uv sync");
         setDevice((prev) => {
           const selected = r.devices.find((item) => item.key === prev);
           return selected?.available ? prev : "auto";
@@ -208,26 +219,31 @@ export default function Training() {
   }
 
   async function startTraining() {
+    setTrainingError(null);
     resetMetrics();
     setNotificationPermission(await requestTrainingNotifications());
-    await api.post("/training/start", {
-      batch_size:    batchSize,
-      phase1_epochs: phase1Epochs,
-      phase2_epochs: phase2Epochs,
-      phase2_lr:     parseFloat(phase2Lr),
-      face_crop_dir: useFaceCrop ? segOutputDir : "",
-      patience,
-      device,
-      backbone,
-      training_mode: trainingMode,
-      finetune: trainingMode === "finetune",
-      initial_best_val_acc: trainingMode === "finetune" ? artifacts?.config_best_val_acc ?? 0 : 0,
-      no_amp: noAmp,
-      mixup_alpha:  parseFloat(mixupAlpha)  || 0,
-      cutmix_alpha: parseFloat(cutmixAlpha) || 0,
-      ema_decay:    emaEnabled ? (parseFloat(emaDecay) || 0.9998) : 0,
-    });
-    setTrainState("running");
+    try {
+      await api.post("/training/start", {
+        batch_size:    batchSize,
+        phase1_epochs: phase1Epochs,
+        phase2_epochs: phase2Epochs,
+        phase2_lr:     parseFloat(phase2Lr),
+        face_crop_dir: useFaceCrop ? segOutputDir : "",
+        patience,
+        device,
+        backbone,
+        training_mode: trainingMode,
+        finetune: trainingMode === "finetune",
+        initial_best_val_acc: trainingMode === "finetune" ? artifacts?.config_best_val_acc ?? 0 : 0,
+        no_amp: noAmp,
+        mixup_alpha:  parseFloat(mixupAlpha)  || 0,
+        cutmix_alpha: parseFloat(cutmixAlpha) || 0,
+        ema_decay:    emaEnabled ? (parseFloat(emaDecay) || 0.9998) : 0,
+      });
+      setTrainState("running");
+    } catch (e) {
+      setTrainingError(e instanceof Error ? e.message : String(e));
+    }
   }
 
   async function stopTraining() {
@@ -240,7 +256,7 @@ export default function Training() {
 
   const running = trainState === "running";
   const latestMetric = trainMetrics.at(-1);
-  const xpuOption = deviceOptions.find((item) => item.key === "xpu");
+  const selectedDeviceOption = deviceOptions.find((item) => item.key === device);
 
   // ── 진행률 계산 ────────────────────────────────────────
 
@@ -272,7 +288,7 @@ export default function Training() {
            <p className="text-sm font-medium text-gray-200">{t("training.params_title")}</p>
  
            <div>
-            <label className="label-text">백본 모델</label>
+            <label className="label-text">{tx("백본 모델", "Backbone Model")}</label>
             <select
               value={backbone}
               onChange={(e) => {
@@ -297,7 +313,7 @@ export default function Training() {
             })()}
             {artifacts?.config_backbone && artifacts.config_backbone !== backbone && (
               <p className="mt-1 text-[11px] text-amber-400">
-                현재 저장된 모델: {artifacts.config_backbone}
+                {tx("현재 저장된 모델", "Current saved model")}: {artifacts.config_backbone}
               </p>
             )}
           </div>
@@ -312,9 +328,29 @@ export default function Training() {
                 </option>
               ))}
             </select>
-            {xpuOption && !xpuOption.available && (
+            <div className="mt-2 rounded-lg border border-gray-800 bg-gray-950 p-2 text-[11px] leading-4 text-gray-500">
+              <p>
+                {tx("현재 torch", "Current torch")}: <span className="text-gray-300">{torchVersion}</span>
+                {" · "}
+                {tx("활성 프로필", "active profile")}: <span className="text-gray-300">{activeBackend}</span>
+              </p>
+              <p>
+                {tx("감지된 권장 프로필", "Detected recommended profile")}:{" "}
+                <span className="text-gray-300">{recommendedBackend}</span>
+                {" · "}
+                <code className="text-brand-300">{recommendedSync}</code>
+              </p>
+            </div>
+            {selectedDeviceOption && !selectedDeviceOption.available && (
               <p className="mt-1 text-[11px] leading-4 text-amber-400">
-                {xpuOption.reason}
+                {selectedDeviceOption.reason}
+                {selectedDeviceOption.sync_command && (
+                  <>
+                    <br />
+                    <span className="text-gray-500">{tx("전환 명령", "Switch command")}: </span>
+                    <code className="text-brand-300">{selectedDeviceOption.sync_command}</code>
+                  </>
+                )}
               </p>
             )}
           </div>
@@ -356,7 +392,7 @@ export default function Training() {
 
 
           <div>
-            <label className="label-text">학습 시작 방식</label>
+            <label className="label-text">{tx("학습 시작 방식", "Training Start Mode")}</label>
             <select
               value={trainingMode}
               onChange={(e) => setTrainingMode(e.target.value as TrainingMode)}
@@ -364,19 +400,28 @@ export default function Training() {
               disabled={running}
             >
               <option value="resume" disabled={!artifacts?.checkpoint.exists}>
-                체크포인트 이어서
+                {tx("체크포인트 이어서", "Resume from checkpoint")}
               </option>
               <option value="finetune" disabled={!artifacts?.best_model.exists}>
-                기존 best_model 파인튜닝
+                {tx("기존 best_model 파인튜닝", "Finetune from best_model")}
               </option>
-              <option value="fresh">처음부터 새 학습</option>
+              <option value="fresh">{tx("처음부터 새 학습", "Train from scratch")}</option>
             </select>
             <p className="mt-1 text-[11px] leading-4 text-gray-500">
               {trainingMode === "resume"
-                ? `checkpoint.pth에서 이어서 시작합니다. ${artifacts?.checkpoint.exists ? "" : "현재 체크포인트가 없습니다."}`
+                ? tx(
+                  `checkpoint.pth에서 이어서 시작합니다. ${artifacts?.checkpoint.exists ? "" : "현재 체크포인트가 없습니다."}`,
+                  `Start from checkpoint.pth. ${artifacts?.checkpoint.exists ? "" : "No checkpoint exists."}`
+                )
                 : trainingMode === "finetune"
-                  ? `best_model.pth를 로드해 Phase 2부터 이어갑니다. 기존 best ${fmtPct(artifacts?.config_best_val_acc)}`
-                  : "기존 checkpoint.pth를 무시하고 새 모델로 Phase 1부터 시작합니다."}
+                  ? tx(
+                    `best_model.pth를 로드해 Phase 2부터 이어갑니다. 기존 best ${fmtPct(artifacts?.config_best_val_acc)}`,
+                    `Load best_model.pth and continue from Phase 2. Previous best ${fmtPct(artifacts?.config_best_val_acc)}`
+                  )
+                  : tx(
+                    "기존 checkpoint.pth를 무시하고 새 모델로 Phase 1부터 시작합니다.",
+                    "Ignore existing checkpoint.pth and start a new model from Phase 1."
+                  )}
             </p>
           </div>
 
@@ -394,7 +439,7 @@ export default function Training() {
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="label-text">
-                  Mixup α <span className="text-gray-600 font-normal">(0=끄기)</span>
+                  Mixup α <span className="text-gray-600 font-normal">{tx("(0=끄기)", "(0=off)")}</span>
                 </label>
                 <input
                   type="number" step="0.1" min={0} max={2}
@@ -405,7 +450,7 @@ export default function Training() {
               </div>
               <div>
                 <label className="label-text">
-                  CutMix α <span className="text-gray-600 font-normal">(0=끄기)</span>
+                  CutMix α <span className="text-gray-600 font-normal">{tx("(0=끄기)", "(0=off)")}</span>
                 </label>
                 <input
                   type="number" step="0.1" min={0} max={2}
@@ -416,7 +461,10 @@ export default function Training() {
               </div>
             </div>
             <p className="text-[11px] text-gray-600 leading-4">
-              권장: Mixup 0.4 · CutMix 1.0. 둘 다 켜면 배치마다 50/50으로 선택.
+              {tx(
+                "권장: Mixup 0.4 · CutMix 1.0. 둘 다 켜면 배치마다 50/50으로 선택.",
+                "Recommended: Mixup 0.4 · CutMix 1.0. If both are on, each batch uses one at 50/50."
+              )}
             </p>
           </div>
 
@@ -439,7 +487,7 @@ export default function Training() {
                   className="input" disabled={running}
                 />
                 <p className="mt-1 text-[11px] text-gray-600 leading-4">
-                  권장 0.9998 — 클수록 느린 추적, 작을수록 빠른 추적
+                  {tx("권장 0.9998 — 클수록 느린 추적, 작을수록 빠른 추적", "Recommended 0.9998 — higher is slower tracking, lower is faster tracking")}
                 </p>
               </div>
             )}
@@ -452,6 +500,11 @@ export default function Training() {
                <button onClick={stopTraining} className="btn-danger w-full">{t("training.stop_btn")}</button>
              )}
            </div>
+           {trainingError && (
+             <div className="rounded-lg border border-red-800 bg-red-950/30 p-3 text-xs leading-5 text-red-300 whitespace-pre-wrap">
+               {trainingError}
+             </div>
+           )}
 
            <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3 space-y-2">
              <div className="flex items-center justify-between gap-2">
@@ -471,6 +524,37 @@ export default function Training() {
                </button>
              )}
            </div>
+           {trainBottleneck && running && (
+             <div
+               className={`rounded-lg p-3 space-y-1 border ${
+                 trainBottleneck.level === "critical"
+                   ? "border-red-500/50 bg-red-950/40"
+                   : "border-amber-500/50 bg-amber-950/30"
+               }`}
+             >
+               <p className={`text-xs font-semibold ${
+                 trainBottleneck.level === "critical" ? "text-red-300" : "text-amber-300"
+               }`}>
+                 {trainBottleneck.code === "stalled"
+                   ? t("training.bottleneck_stalled_title")
+                   : t("training.bottleneck_slowdown_title")}
+               </p>
+               <p className="text-[11px] leading-4 text-gray-300">
+                 {trainBottleneck.code === "stalled"
+                   ? t("training.bottleneck_stalled_desc", {
+                     split: trainBottleneck.split,
+                     sec: Math.floor(trainBottleneck.stalled_sec),
+                   })
+                   : t("training.bottleneck_slowdown_desc", {
+                     split: trainBottleneck.split,
+                     ratio: (trainBottleneck.slowdown_ratio * 100).toFixed(0),
+                   })}
+               </p>
+               <p className="text-[10px] text-gray-500 font-mono">
+                 now {trainBottleneck.current_speed.toFixed(2)} it/s · baseline {trainBottleneck.baseline_speed.toFixed(2)} it/s
+               </p>
+             </div>
+           )}
 
         </div>
 
@@ -628,7 +712,7 @@ export default function Training() {
              {(segState === "running" || (segState === "done" && segPct > 0)) && (
                <div className="space-y-1.5">
                  <div className="flex justify-between text-xs text-gray-400">
-                   <span>{segClass || "처리 중..."}</span>
+                   <span>{segClass || tx("처리 중...", "Processing...")}</span>
                    <span className="tabular-nums">
                      {segPct.toFixed(1)}%
                      {segEta > 0 ? ` · ${fmtEta(segEta)}` : ""}

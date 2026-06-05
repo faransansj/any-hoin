@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CrawlHealthResponse, CrawlProgress, JobState, TrainMetric, TrainProgress } from "../types";
 import { api } from "../api";
+import { useTranslation } from "react-i18next";
 
 const TRAIN_EVENT_PREFIX = "__HOLOSCOPE_TRAIN_EVENT__ ";
 const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
@@ -63,6 +64,9 @@ export default function JobConsole({
   onMessage,
   maxLines = 400,
 }: Props) {
+  const { i18n } = useTranslation();
+  const isKo = i18n.resolvedLanguage?.startsWith("ko") ?? false;
+  const tx = (ko: string, en: string) => (isKo ? ko : en);
   const [lines, setLines] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -146,20 +150,20 @@ export default function JobConsole({
       <button
         onClick={handleCopy}
         disabled={lines.length === 0}
-        title="클립보드에 복사"
+        title={tx("클립보드에 복사", "Copy to clipboard")}
         className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       >
         <ClipboardIcon />
-        {copied ? "복사됨" : "복사"}
+        {copied ? tx("복사됨", "Copied") : tx("복사", "Copy")}
       </button>
       <button
         onClick={handleClear}
         disabled={lines.length === 0}
-        title="로그 지우기"
+        title={tx("로그 지우기", "Clear logs")}
         className="flex items-center gap-1 px-2 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:bg-red-900 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       >
         <TrashIcon />
-        지우기
+        {tx("지우기", "Clear")}
       </button>
     </div>
   );
@@ -174,7 +178,7 @@ export default function JobConsole({
       )}
       <div className="bg-gray-950 border border-gray-800 rounded-lg h-64 overflow-y-auto p-3 font-mono text-xs text-gray-300">
         {lines.length === 0 && (
-          <span className="text-gray-600 italic">로그 대기 중...</span>
+          <span className="text-gray-600 italic">{tx("로그 대기 중...", "Waiting for logs...")}</span>
         )}
         {lines.map((line, i) => (
           <div key={i} className="leading-5 whitespace-pre-wrap break-all">

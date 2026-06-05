@@ -212,6 +212,20 @@ export interface TrainProgress {
   avg_acc?:     number;   // current split running average
 }
 
+export type TrainBottleneckLevel = "warning" | "critical";
+export type TrainBottleneckCode = "stalled" | "slowdown";
+
+export interface TrainBottleneck {
+  level:            TrainBottleneckLevel;
+  code:             TrainBottleneckCode;
+  split:            "train" | "val";
+  stalled_sec:      number;
+  current_speed:    number;
+  baseline_speed:   number;
+  slowdown_ratio:   number;
+  observed_at:      number;
+}
+
 export interface TrainingStatus extends JobStatus {
   current_phase:    number;
   best_val_acc:     number;
@@ -228,12 +242,16 @@ export interface DeviceOption {
   label:     string;
   available: boolean;
   reason:    string | null;
+  sync_command?: string | null;
 }
 
 export interface TrainingDevicesResponse {
-  torch_version: string;
-  ipex_version:  string | null;
-  devices:       DeviceOption[];
+  torch_version:             string;
+  ipex_version:              string | null;
+  active_backend?:           string;
+  recommended_backend?:      string;
+  recommended_sync_command?: string;
+  devices:                   DeviceOption[];
 }
 
 export type TrainingMode = "fresh" | "resume" | "finetune";
@@ -288,6 +306,9 @@ export interface ModelMap {
   int4: ModelEntry;
   int2: ModelEntry;
   onnx: ModelEntry;
+  class_map: ModelEntry;
+  config: ModelEntry;
+  onnx_data: ModelEntry;
 }
 
 export interface ModelsResponse {
@@ -307,6 +328,10 @@ export interface InferenceModelInfo {
   test_acc:           number | null;
   preferred_backend?: string | null;
   loaded_backend?:    string | null;
+  loaded_model?:      string | null;
+  active_model?:      string | null;
+  active_model_size_mb?: number | null;
+  custom_model_selected?: boolean;
   model_ready?:       boolean;
 }
 
