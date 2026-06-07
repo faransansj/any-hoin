@@ -290,6 +290,7 @@ export type QuantFormat = "fp16" | "int8" | "int4" | "int2";
 export interface ExportStatus {
   quant: JobStatus;
   onnx:  JobStatus;
+  hoin:  JobStatus;
 }
 
 // ── 모델 정보 ───────────────────────────────────────────
@@ -309,6 +310,7 @@ export interface ModelMap {
   class_map: ModelEntry;
   config: ModelEntry;
   onnx_data: ModelEntry;
+  hoin: ModelEntry;
 }
 
 export interface ModelsResponse {

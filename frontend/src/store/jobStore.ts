@@ -6,6 +6,7 @@ interface JobStore {
   trainState:    JobState;
   quantState:    JobState;
   onnxState:     JobState;
+  hoinState:     JobState;
   trainMetrics:  TrainMetric[];
   bestValAcc:    number;
   trainProgress: TrainProgress | null;
@@ -15,6 +16,7 @@ interface JobStore {
   setTrainState:    (s: JobState) => void;
   setQuantState:    (s: JobState) => void;
   setOnnxState:     (s: JobState) => void;
+  setHoinState:     (s: JobState) => void;
   pushMetric:       (m: TrainMetric) => void;
   setMetrics:       (metrics: TrainMetric[]) => void;
   resetMetrics:     () => void;
@@ -35,6 +37,7 @@ export const useJobStore = create<JobStore>((set) => ({
   trainState:    "idle",
   quantState:    "idle",
   onnxState:     "idle",
+  hoinState:     "idle",
   trainMetrics:  [],
   bestValAcc:    0,
   trainProgress: null,
@@ -44,6 +47,7 @@ export const useJobStore = create<JobStore>((set) => ({
   setTrainState:    (s) => set({ trainState: s }),
   setQuantState:    (s) => set({ quantState: s }),
   setOnnxState:     (s) => set({ onnxState: s }),
+  setHoinState:     (s) => set({ hoinState: s }),
   pushMetric:       (m) => set((st) => {
     const next = st.trainMetrics.filter((metric) => metricKey(metric) !== metricKey(m));
     next.push(m);

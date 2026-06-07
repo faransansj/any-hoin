@@ -1,9 +1,13 @@
 # uv
 .venv/
 
-# 데이터셋 / 체크포인트
+# 데이터셋 / 체크포인트 / 모델 산출물
 dataset/
 checkpoints/
+models/
+
+# local hoin runtime checkout; hoin itself lives in a separate repository
+hoin/
 
 # Python
 __pycache__/
@@ -23,6 +27,7 @@ frontend/*.tsbuildinfo
 # local agent metadata
 .codex/
 .codex
+.hermes/
 
 # thumbnails cache
 .thumbnails/

@@ -1,6 +1,7 @@
 """모델 양자화 / ONNX export 라우터."""
 
 import json
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -9,14 +10,16 @@ from fastapi import APIRouter, HTTPException, WebSocket
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from studio.jobs.export_job import OnnxJob, QuantJob
+from studio.jobs.export_job import HoinExportJob, OnnxJob, QuantJob
 
 CHECKPOINT_DIR = Path("./checkpoints")
 PROJECT_ROOT   = "."
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 router     = APIRouter(prefix="/export", tags=["export"])
 _quant_job = QuantJob()
 _onnx_job  = OnnxJob()
+_hoin_job  = HoinExportJob()
 
 _QUANT_FILES = {
     "fp16": "best_model_fp16.pth",
@@ -58,6 +61,20 @@ def _entry(fname: str) -> dict:
     }
 
 
+def _path_entry(path: Path, filename: str | None = None) -> dict:
+    try:
+        size_mb = round(path.stat().st_size / 1024 ** 2, 1)
+        exists = True
+    except FileNotFoundError:
+        size_mb = None
+        exists = False
+    return {
+        "exists": exists,
+        "size_mb": size_mb,
+        "filename": filename or path.name,
+    }
+
+
 # ── 모델 목록 ─────────────────────────────────────────────
 
 def _load_config_acc() -> float | None:
@@ -79,6 +96,7 @@ def list_models():
         result[fmt] = _entry(fname)
     for key, fname in _METADATA_FILES.items():
         result[key] = _entry(fname)
+    result["hoin"] = _path_entry(Path("./models/any-hoin-hoin-model.zip"), "any-hoin-hoin-model.zip")
     return {"models": result, "config_acc": _load_config_acc()}
 
 
@@ -90,7 +108,8 @@ def get_quant_metrics():
 # ── 양자화 ────────────────────────────────────────────────
 
 @router.post("/quant")
-async def export_quant(body: dict = {}):
+async def export_quant(body: dict | None = None):
+    body = body or {}
     fmt = body.get("format", "fp16")
     await _quant_job.start(fmt, PROJECT_ROOT)
     return {"started": True, "format": fmt}
@@ -105,7 +124,8 @@ async def stop_quant():
 # ── ONNX ─────────────────────────────────────────────────
 
 @router.post("/onnx")
-async def export_onnx(body: dict = {}):
+async def export_onnx(body: dict | None = None):
+    body = body or {}
     opset = int(body.get("opset", 18))
     await _onnx_job.start(opset, PROJECT_ROOT)
     return {"started": True}
@@ -117,11 +137,51 @@ async def stop_onnx():
     return {"stopped": True}
 
 
+# ── hoin 패키지 ───────────────────────────────────────────
+
+@router.post("/hoin")
+async def export_hoin(body: dict | None = None):
+    body = body or {}
+    opset = int(body.get("opset", 18))
+    model_name = str(body.get("model_name", "any-hoin"))
+    force_onnx = bool(body.get("force_onnx", False))
+    if not _MODEL_NAME_RE.fullmatch(model_name):
+        raise HTTPException(400, "Invalid model_name")
+    await _hoin_job.start(opset, PROJECT_ROOT, model_name=model_name, force_onnx=force_onnx)
+    return {"started": True, "model_name": model_name}
+
+
+@router.post("/hoin/stop")
+async def stop_hoin():
+    await _hoin_job.stop()
+    return {"stopped": True}
+
+
+@router.get("/hoin/download")
+def download_hoin_package():
+    path = Path("./models/any-hoin-hoin-model.zip")
+    if not path.exists():
+        raise HTTPException(404, "hoin package not found")
+    return FileResponse(str(path), filename=path.name, media_type="application/zip")
+
+
+@router.get("/hoin/manifest")
+def get_hoin_manifest():
+    path = Path("./models/any-hoin/hoin-model.json")
+    if not path.exists():
+        raise HTTPException(404, "hoin manifest not found")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        raise HTTPException(500, f"failed to read hoin manifest: {exc}") from exc
+
+
 # ── 상태 ─────────────────────────────────────────────────
 
 @router.get("/status")
 def get_status():
-    return {"quant": _quant_job.status(), "onnx": _onnx_job.status()}
+    return {"quant": _quant_job.status(), "onnx": _onnx_job.status(), "hoin": _hoin_job.status()}
 
 
 # ── 다운로드 ─────────────────────────────────────────────
@@ -210,6 +270,12 @@ def clear_onnx_logs():
     return {"cleared": True}
 
 
+@router.post("/logs/clear/hoin")
+def clear_hoin_logs():
+    _hoin_job.clear_buffer()
+    return {"cleared": True}
+
+
 @router.websocket("/logs/quant")
 async def quant_logs(ws: WebSocket):
     await _quant_job.connect_ws(ws)
@@ -218,3 +284,8 @@ async def quant_logs(ws: WebSocket):
 @router.websocket("/logs/onnx")
 async def onnx_logs(ws: WebSocket):
     await _onnx_job.connect_ws(ws)
+
+
+@router.websocket("/logs/hoin")
+async def hoin_logs(ws: WebSocket):
+    await _hoin_job.connect_ws(ws)
