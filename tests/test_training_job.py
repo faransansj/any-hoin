@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from studio.jobs.base_job import _clean_output_line
+from studio.jobs.export_job import HoinExportJob
 from studio.jobs.train_job import TRAIN_EVENT_PREFIX, TrainJob
 
 
@@ -66,6 +67,34 @@ def test_train_job_hides_structured_and_tqdm_log_lines():
     assert job._format_log_line("  warnings.warn(str(msg))") is None
     assert job._format_log_line("  warnings.warn(") is None
     assert job._format_log_line("  Epoch  1/2 | train_loss: 0.7000  train_acc: 0.5000 | val_loss: 0.6000  val_acc: 0.7500")
+
+
+def test_hoin_export_job_builds_one_click_command(monkeypatch):
+    captured = {}
+
+    async def fake_run(cmd, cwd="."):
+        captured["cmd"] = cmd
+        captured["cwd"] = cwd
+
+    async def run_job():
+        job = HoinExportJob()
+        monkeypatch.setattr(job, "_run", fake_run)
+        await job.start(18, ".", model_name="any-hoin", force_onnx=True)
+        assert job._task is not None
+        await job._task
+
+    asyncio.run(run_job())
+
+    cmd = captured["cmd"]
+    assert cmd[1] == "scripts/export_hoin_model.py"
+    assert "--opset" in cmd
+    assert "18" in cmd
+    assert "--output-dir" in cmd
+    assert "./models/any-hoin" in cmd
+    assert "--zip-path" in cmd
+    assert "./models/any-hoin-hoin-model.zip" in cmd
+    assert "--force-onnx" in cmd
+    assert captured["cwd"] == "."
 
 
 def test_clean_output_line_removes_carriage_return_progress_fragments():

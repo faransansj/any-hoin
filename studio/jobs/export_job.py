@@ -45,3 +45,38 @@ class OnnxJob(BaseJob):
         self.state = "running"
         cmd = [sys.executable, "export_onnx.py", "--opset", str(opset)]
         self._task = asyncio.create_task(self._run(cmd, cwd=project_root))
+
+
+class HoinExportJob(BaseJob):
+    def __init__(self):
+        super().__init__("hoin")
+
+    async def start(
+        self,
+        opset: int,
+        project_root: str,
+        model_name: str = "any-hoin",
+        force_onnx: bool = False,
+    ):
+        if self.state == "running":
+            return
+        self.state = "running"
+        cmd = [
+            sys.executable,
+            "scripts/export_hoin_model.py",
+            "--opset",
+            str(opset),
+            "--checkpoint-dir",
+            "./checkpoints",
+            "--output-dir",
+            f"./models/{model_name}",
+            "--model-name",
+            model_name,
+            "--characters",
+            "./characters.json",
+            "--zip-path",
+            f"./models/{model_name}-hoin-model.zip",
+        ]
+        if force_onnx:
+            cmd.append("--force-onnx")
+        self._task = asyncio.create_task(self._run(cmd, cwd=project_root))

@@ -295,6 +295,7 @@ export type QuantFormat = "fp16" | "int8" | "int4" | "int2";
 export interface ExportStatus {
   quant: JobStatus;
   onnx:  JobStatus;
+  hoin:  JobStatus;
 }
 
 // ── 모델 정보 ───────────────────────────────────────────
@@ -311,6 +312,7 @@ export interface ModelMap {
   int4: ModelEntry;
   int2: ModelEntry;
   onnx: ModelEntry;
+  hoin: ModelEntry;
 }
 
 export interface ModelsResponse {

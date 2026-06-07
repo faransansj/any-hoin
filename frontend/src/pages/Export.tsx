@@ -58,12 +58,12 @@ const QUANT_OPTIONS: {
 const QUANT_KEYS: QuantFormat[] = ["fp16", "int8", "int4", "int2"];
 
 export default function Export() {
-  const { quantState, onnxState, setQuantState, setOnnxState } = useJobStore();
+  const { quantState, onnxState, hoinState, setQuantState, setOnnxState, setHoinState } = useJobStore();
   const [models,    setModels]    = useState<ModelMap | null>(null);
   const [configAcc, setConfigAcc] = useState<number | null>(null);
   const [format,    setFormat]    = useState<QuantFormat>("fp16");
   const [opset,     setOpset]     = useState(18);
-  const [logTab,    setLogTab]    = useState<"quant" | "onnx">("quant");
+  const [logTab,    setLogTab]    = useState<"quant" | "onnx" | "hoin">("quant");
 
   async function loadModels() {
     const r = await api.get<ModelsResponse>("/export/models");
@@ -74,17 +74,18 @@ export default function Export() {
   useEffect(() => {
     loadModels();
     api.get<ExportStatus>("/export/status")
-      .then((r) => { setQuantState(r.quant.state); setOnnxState(r.onnx.state); })
+      .then((r) => { setQuantState(r.quant.state); setOnnxState(r.onnx.state); setHoinState(r.hoin.state); })
       .catch(console.error);
   }, []);
 
   useEffect(() => {
-    if (quantState === "done" || onnxState === "done") loadModels();
-  }, [quantState, onnxState]);
+    if (quantState === "done" || onnxState === "done" || hoinState === "done") loadModels();
+  }, [quantState, onnxState, hoinState]);
 
   const selectedOpt = QUANT_OPTIONS.find((o) => o.value === format)!;
   const quantRunning = quantState === "running";
   const onnxRunning  = onnxState  === "running";
+  const hoinRunning  = hoinState  === "running";
 
   // 비교 테이블: fp32 + 존재하는 양자화 + onnx
   const tableRows = (["fp32", ...QUANT_KEYS, "onnx"] as const).filter(
@@ -99,7 +100,7 @@ export default function Export() {
       </div>
 
       {/* ── 카드 행 ── */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
         {/* ── 양자화 카드 ── */}
         <div className="card space-y-4">
@@ -232,6 +233,55 @@ export default function Export() {
             </a>
           )}
         </div>
+
+        {/* ── hoin 카드 ── */}
+        <div className="card space-y-4">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-sm text-green-300">hoin 서비스 패키지</span>
+            <StatusBadge state={hoinState} />
+          </div>
+
+          <div className="rounded-lg bg-green-950/20 border border-green-900/50 px-3 py-2 text-xs text-gray-300 space-y-2">
+            <p className="leading-5">
+              hoin에서 바로 쓰는 모델 폴더/zip을 생성합니다. ONNX, 외부 weights,
+              <code className="mx-1 text-green-200">hoin-model.json</code>,
+              <code className="mx-1 text-green-200">class_map.json</code>을 함께 내보냅니다.
+            </p>
+            <div className="flex justify-between">
+              <span>패키지</span>
+              <span className={models?.hoin.exists ? "text-green-400" : "text-gray-600"}>
+                {models?.hoin.exists ? `✓ ${models.hoin.size_mb} MB` : "미생성"}
+              </span>
+            </div>
+            <div className="text-[11px] text-gray-500">
+              출력: <code>models/any-hoin/</code> 및 <code>models/any-hoin-hoin-model.zip</code>
+            </div>
+          </div>
+
+          {!hoinRunning ? (
+            <button
+              onClick={() => { setLogTab("hoin"); api.post("/export/hoin", { opset, model_name: "any-hoin" }); }}
+              disabled={!models?.fp32.exists}
+              className="btn-primary w-full text-sm"
+            >
+              hoin용으로 한 번에 내보내기
+            </button>
+          ) : (
+            <button onClick={() => api.post("/export/hoin/stop")} className="btn-danger w-full text-sm">
+              중단
+            </button>
+          )}
+
+          {models?.hoin.exists && (
+            <a
+              href="/api/export/hoin/download"
+              download
+              className="block text-center btn-ghost text-xs py-1"
+            >
+              ⬇ hoin 패키지 ZIP 다운로드
+            </a>
+          )}
+        </div>
       </div>
 
       {/* ── 비교 테이블 ── */}
@@ -296,7 +346,7 @@ export default function Export() {
       {/* ── 로그 ── */}
       <div className="card">
         <div className="flex gap-2 mb-2">
-          {(["quant", "onnx"] as const).map((t) => (
+          {(["quant", "onnx", "hoin"] as const).map((t) => (
             <button
               key={t}
               onClick={() => setLogTab(t)}
@@ -304,14 +354,18 @@ export default function Export() {
                 logTab === t ? "bg-brand-600 text-white" : "bg-gray-800 text-gray-400"
               }`}
             >
-              {t === "quant" ? "양자화" : "ONNX"} 로그
+              {t === "quant" ? "양자화" : t === "onnx" ? "ONNX" : "hoin"} 로그
             </button>
           ))}
         </div>
         <JobConsole
           key={logTab}
           jobPath={`/export/logs/${logTab}`}
-          onState={(s) => logTab === "quant" ? setQuantState(s) : setOnnxState(s)}
+          onState={(s) => {
+            if (logTab === "quant") setQuantState(s);
+            else if (logTab === "onnx") setOnnxState(s);
+            else setHoinState(s);
+          }}
         />
       </div>
     </div>
